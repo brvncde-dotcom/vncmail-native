@@ -46,6 +46,9 @@ function isPinned(email: Email): boolean {
   return !!email.keywords?.$important;
 }
 
+// Height of the sender line when the avatar is hidden (extra-compact density),
+// used to anchor the unread dot on that first line.
+const UNREAD_DOT_TEXT_LINE = 20;
 
 const EmailRow = React.memo(function EmailRow({
   item,
@@ -92,7 +95,14 @@ const EmailRow = React.memo(function EmailRow({
       onLongPress={handleLongPress}
       delayLongPress={300}
     >
-      {unread && <View style={styles.unreadDot} />}
+      {unread && (
+        <View
+          style={[
+            styles.unreadDot,
+            { top: density.rowPaddingVertical + (density.showAvatar ? componentSizes.avatarMd : UNREAD_DOT_TEXT_LINE) / 2 - 4 },
+          ]}
+        />
+      )}
       {selectionMode && (
         <View style={styles.rowCheckboxWrap}>
           {selected ? (
@@ -1369,11 +1379,12 @@ function makeStyles(c: ThemePalette) {
   // Mirrors the webmail's unread indicator: an 8px filled circle at the row's
   // start edge, vertically centered (email-list-item.tsx, fill-unread). The
   // weight/color change alone is too subtle on some device fonts (#27).
+  // `top` is set per row: the dot is anchored on the row's *first* line (top
+  // padding + half an avatar), not on the row's midpoint, which would drop it
+  // a full line below the checkbox and avatar it reads as a column with.
   unreadDot: {
     position: 'absolute',
     left: 4,
-    top: '50%',
-    marginTop: -4,
     width: 8,
     height: 8,
     borderRadius: 4,
