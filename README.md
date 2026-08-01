@@ -26,10 +26,10 @@ React Native (Expo SDK 54) client for [Bulwark Webmail](https://github.com/bulwa
 
 ## What's missing or rough
 
-- iOS build is untested
+- iOS builds, but push notifications and client certificates are Android-only so far
 - Filters & rules, S/MIME, plugins, themes, file storage - UI stubs only
 - Calendar editing is partial; contacts editing is basic
-- No Play Store distribution yet (sideload APK from Releases)
+- No Play Store distribution yet (sideload APK from Releases); iOS ships via TestFlight
 
 ## Run locally
 
@@ -41,6 +41,7 @@ npx expo start
 Then press `a` for Android, `i` for iOS, or scan the QR with Expo Go.
 
 For a release APK build see [.github/workflows/release-android.yml](.github/workflows/release-android.yml).
+For iOS builds and TestFlight distribution see [docs/ios-release.md](docs/ios-release.md).
 
 ## License
 

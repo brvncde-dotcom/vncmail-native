@@ -1,0 +1,227 @@
+name: Release iOS (TestFlight)
+
+# The iOS project is NOT committed - unlike android/, which is hand-maintained,
+# ios/ is gitignored and generated fresh by `expo prebuild` on every run. Keep
+# any native iOS change in app.config.js (or a config plugin), never in ios/.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      upload_to_testflight:
+        description: "Upload the build to TestFlight (off = build the IPA only)"
+        type: boolean
+        required: false
+        default: true
+
+concurrency:
+  group: release-ios-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    env:
+      EXPO_NO_TELEMETRY: "1"
+      # App Store Connect refuses a CFBundleVersion it has already seen for this
+      # marketing version, so every run needs a fresh, increasing number.
+      IOS_BUILD_NUMBER: ${{ github.run_number }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Show toolchain versions
+        run: |
+          xcodebuild -version
+          pod --version
+
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/CocoaPods
+            ~/.cocoapods/repos
+          key: pods-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: pods-${{ runner.os }}-
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Generate the iOS project
+        run: npx expo prebuild --platform ios --clean
+
+      - name: Check for signing credentials
+        id: creds
+        env:
+          CERT: ${{ secrets.IOS_DIST_CERT_BASE64 }}
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+          TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$CERT" ] && [ -n "$ASC_KEY" ] && [ -n "$TEAM" ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Signing secrets are not configured - compiling without signing. No IPA will be produced."
+          fi
+
+      - name: Resolve workspace and scheme
+        id: xcode
+        run: |
+          WORKSPACE=$(ls -d ios/*.xcworkspace | head -1)
+          SCHEME=$(basename "$WORKSPACE" .xcworkspace)
+          echo "workspace=$WORKSPACE" >> "$GITHUB_OUTPUT"
+          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
+          echo "Using workspace $WORKSPACE, scheme $SCHEME"
+
+      # ── Unsigned path: a compile check only, so the workflow is still useful
+      # on forks and before the Apple secrets exist.
+      - name: Build without signing
+        if: steps.creds.outputs.signed != 'true'
+        run: |
+          xcodebuild build \
+            -workspace "${{ steps.xcode.outputs.workspace }}" \
+            -scheme "${{ steps.xcode.outputs.scheme }}" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      # ── Signed path ────────────────────────────────────────────
+      - name: Import the distribution certificate
+        if: steps.creds.outputs.signed == 'true'
+        env:
+          CERT_BASE64: ${{ secrets.IOS_DIST_CERT_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          # Ephemeral runner, ephemeral keychain - this password protects nothing
+          # beyond the life of the job.
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+          echo "$CERT_BASE64" | base64 -d > "$RUNNER_TEMP/dist.p12"
+          security import "$RUNNER_TEMP/dist.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security -f pkcs12
+          rm -f "$RUNNER_TEMP/dist.p12"
+
+          # Without this, codesign triggers an interactive keychain prompt that
+          # nothing can answer on a headless runner.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+
+          # Put our keychain first in the search list, keeping the login one so
+          # Xcode can still reach Apple's intermediate certificates.
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed 's/"//g')
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
+      - name: Install the App Store Connect API key
+        if: steps.creds.outputs.signed == 'true'
+        env:
+          ASC_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+        run: |
+          # Both xcodebuild -allowProvisioningUpdates and altool look the key up
+          # by ID in this directory.
+          mkdir -p ~/private_keys
+          echo "$ASC_KEY_BASE64" | base64 -d > ~/private_keys/AuthKey_${ASC_KEY_ID}.p8
+          chmod 600 ~/private_keys/AuthKey_${ASC_KEY_ID}.p8
+
+      - name: Archive
+        if: steps.creds.outputs.signed == 'true'
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # -allowProvisioningUpdates lets Xcode create/refresh the App Store
+          # provisioning profile through the API key, so no .mobileprovision has
+          # to be stored as a secret.
+          xcodebuild archive \
+            -workspace "${{ steps.xcode.outputs.workspace }}" \
+            -scheme "${{ steps.xcode.outputs.scheme }}" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Bulwark.xcarchive" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath ~/private_keys/AuthKey_${ASC_KEY_ID}.p8 \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            CODE_SIGN_STYLE=Automatic \
+            DEVELOPMENT_TEAM="$TEAM_ID"
+
+      - name: Export the IPA
+        if: steps.creds.outputs.signed == 'true'
+        id: export
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store</string>
+            <key>teamID</key><string>${TEAM_ID}</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>uploadSymbols</key><true/>
+            <key>destination</key><string>export</string>
+          </dict>
+          </plist>
+          PLIST
+
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/Bulwark.xcarchive" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath ~/private_keys/AuthKey_${ASC_KEY_ID}.p8 \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          SRC=$(ls "$RUNNER_TEMP"/export/*.ipa | head -1)
+          DEST="bulwark-mobile-${VERSION}-${GITHUB_SHA::7}.ipa"
+          cp "$SRC" "$DEST"
+          echo "path=$DEST" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.creds.outputs.signed == 'true'
+        with:
+          name: ${{ steps.export.outputs.path }}
+          path: ${{ steps.export.outputs.path }}
+          if-no-files-found: error
+
+      - name: Upload to TestFlight
+        # The IPA is not attached to the GitHub release: without an Apple device
+        # provisioned for it, it is not installable, and TestFlight is the only
+        # distribution channel for it.
+        if: >-
+          steps.creds.outputs.signed == 'true' &&
+          (github.event_name == 'release' || inputs.upload_to_testflight)
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          IPA="${{ steps.export.outputs.path }}"
+          # Validate first - it catches missing Info.plist keys and entitlement
+          # mistakes in seconds, instead of via a rejection email 20 minutes later.
+          xcrun altool --validate-app --type ios --file "$IPA" \
+            --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+          xcrun altool --upload-app --type ios --file "$IPA" \
+            --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+          echo "::notice::Uploaded build ${IOS_BUILD_NUMBER} to App Store Connect. Processing usually takes 5-30 minutes before it appears in TestFlight."

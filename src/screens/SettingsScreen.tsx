@@ -38,6 +38,7 @@ import { LayoutSettings } from '../components/settings/LayoutSettings';
 import { DownloadsSettings } from '../components/settings/DownloadsSettings';
 import { useLocaleStore } from '../stores/locale-store';
 import { useHasCalendar, useHasContacts, useHasFiles } from '../lib/capabilities';
+import { supportsSideloadUpdates } from '../lib/platform-capabilities';
 
 type Tab =
   | 'account' | 'language' | 'notifications'
@@ -138,11 +139,18 @@ const TAB_COMPONENTS: Partial<Record<Tab, React.ComponentType<any>>> = {
   updates: UpdatesSettings,
 };
 
+// Tabs whose feature does not exist on this platform never appear in the list.
+// The "Updates" pane drives the sideload installer, which is Android-only - the
+// current version and build are still shown under "About & Data".
+const AVAILABLE_TABS: TabDef[] = TABS.filter(
+  (t) => t.id !== 'updates' || supportsSideloadUpdates,
+);
+
 function groupTabs() {
   return GROUP_ORDER.map(group => ({
     group,
     label: GROUP_LABELS[group],
-    items: TABS.filter(t => t.group === group),
+    items: AVAILABLE_TABS.filter(t => t.group === group),
   })).filter(g => g.items.length > 0);
 }
 

@@ -4,6 +4,7 @@ import Constants from 'expo-constants';
 import { fetchLatestRelease, type LatestRelease } from '../api/updates';
 import { isNewer } from '../lib/version-compare';
 import { downloadAndInstallApk, type InstallProgress } from '../lib/install-update';
+import { supportsSideloadUpdates } from '../lib/platform-capabilities';
 
 const STORAGE_KEY = 'webmail:updates:v1';
 const MIN_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -80,6 +81,10 @@ export const useUpdatesStore = create<UpdatesState>((set, get) => ({
   },
 
   checkNow: async (opts) => {
+    // On platforms without sideloading there is nothing actionable to report,
+    // so skip the GitHub round-trip entirely rather than caching a release the
+    // user can never install.
+    if (!supportsSideloadUpdates) return;
     const s = get();
     if (s.checking) return;
     const now = Date.now();
@@ -104,6 +109,7 @@ export const useUpdatesStore = create<UpdatesState>((set, get) => ({
   },
 
   installLatest: async () => {
+    if (!supportsSideloadUpdates) return;
     const s = get();
     if (s.installing || !s.cachedLatest?.apkAsset) return;
     set({ installing: true, error: null, installProgress: { phase: 'downloading', progress: 0 } });
@@ -142,6 +148,7 @@ export const useUpdatesStore = create<UpdatesState>((set, get) => ({
   currentVersion: () => Constants.expoConfig?.version ?? '0.0.0',
 
   hasUpdate: () => {
+    if (!supportsSideloadUpdates) return false;
     const s = get();
     if (!s.cachedLatest) return false;
     const current = Constants.expoConfig?.version ?? '0.0.0';
