@@ -58,9 +58,7 @@ App Store Connect → Users and Access → Integrations → App Store Connect AP
 **+**, with the **App Manager** role. Download the `.p8` (**one download only**)
 and note the **Key ID** and the **Issuer ID** shown above the key list.
 
-This one key does two jobs: it lets `xcodebuild -allowProvisioningUpdates` create
-and refresh the provisioning profile, which is why no `.mobileprovision` has to
-be stored anywhere, and it authenticates the TestFlight upload.
+The key authenticates the TestFlight upload.
 
 ### 4. App ID, then app record
 
@@ -80,6 +78,23 @@ the entire App Store.
 The TestFlight upload is rejected if the app record does not exist - and that
 failure lands at the very end of a ~30 minute build.
 
+### 5. App Store provisioning profile
+
+developer.apple.com → Profiles → **+** → Distribution → **App Store Connect**.
+Pick the App ID from step 4 and the distribution certificate from step 2, name it
+`Bulwark Mobile App Store`, and download the `.mobileprovision`.
+
+The build signs **manually** and this profile is not optional. Automatic signing
+would be less to maintain, but `xcodebuild archive` under automatic signing always
+signs with a *development* identity and leans on `-exportArchive` to re-sign for
+distribution afterwards. That needs a development certificate and at least one
+registered device - neither of which a CI-only TestFlight pipeline has any reason
+to own, and Apple will not issue a development profile without a device. Naming
+the App Store profile up front avoids the whole problem.
+
+The profile expires when the certificate does (2027-08-01). Regenerate it here and
+update the secret when that happens.
+
 ## Repository secrets
 
 Settings → Secrets and variables → Actions:
@@ -92,6 +107,7 @@ Settings → Secrets and variables → Actions:
 | `APP_STORE_CONNECT_KEY_ID` | Key ID from step 3 |
 | `APP_STORE_CONNECT_ISSUER_ID` | Issuer ID from step 3 |
 | `APP_STORE_CONNECT_PRIVATE_KEY` | The `.p8` from step 3, base64-encoded |
+| `IOS_PROVISIONING_PROFILE_BASE64` | The `.mobileprovision` from step 5, base64-encoded |
 
 To base64-encode a file:
 
