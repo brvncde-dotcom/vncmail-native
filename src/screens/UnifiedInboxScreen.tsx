@@ -221,12 +221,13 @@ function makeStyles(c: ThemePalette) {
     },
     rowPressed: { backgroundColor: c.surfaceHover },
     // Same unread indicator as the mailbox list (and the webmail): an 8px
-    // filled circle in the start gutter, vertically centered (#27).
+    // filled circle in the start gutter (#27). Anchored on the row's *first*
+    // line — top padding + half an avatar — because centring it on the row
+    // drops it a full line below the avatar it reads as a column with.
     unreadDot: {
       position: 'absolute',
       left: 4,
-      top: '50%',
-      marginTop: -4,
+      top: spacing.md + componentSizes.avatarMd / 2 - 4,
       width: 8,
       height: 8,
       borderRadius: 4,
