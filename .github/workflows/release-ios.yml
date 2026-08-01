@@ -148,6 +148,13 @@ jobs:
           # -allowProvisioningUpdates lets Xcode create/refresh the App Store
           # provisioning profile through the API key, so no .mobileprovision has
           # to be stored as a secret.
+          #
+          # CODE_SIGN_IDENTITY has to be forced: the Expo iOS template hardcodes
+          # "Apple Development", and automatic signing honours it even when
+          # archiving Release. Xcode then asks Apple for a *development* profile,
+          # which needs a registered device, and fails with "Your team has no
+          # devices from which to generate a provisioning profile" - misleading,
+          # because a TestFlight build never needs one.
           xcodebuild archive \
             -workspace "${{ steps.xcode.outputs.workspace }}" \
             -scheme "${{ steps.xcode.outputs.scheme }}" \
@@ -159,7 +166,24 @@ jobs:
             -authenticationKeyID "$ASC_KEY_ID" \
             -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
             CODE_SIGN_STYLE=Automatic \
-            DEVELOPMENT_TEAM="$TEAM_ID"
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER=""
+
+      # Signing failures report a symptom ("no profiles found") rather than the
+      # setting that caused it, and a re-run costs ~30 minutes. Dump the
+      # resolved values instead of guessing twice.
+      - name: Dump signing settings
+        if: failure() && steps.creds.outputs.signed == 'true'
+        continue-on-error: true
+        run: |
+          echo "── identities in the keychain ──"
+          security find-identity -v -p codesigning || true
+          echo "── resolved build settings ──"
+          xcodebuild -workspace "${{ steps.xcode.outputs.workspace }}" \
+            -scheme "${{ steps.xcode.outputs.scheme }}" \
+            -configuration Release -showBuildSettings 2>/dev/null \
+            | grep -Ei 'CODE_SIGN|PROVISIONING|DEVELOPMENT_TEAM|PRODUCT_BUNDLE_ID' | sort -u || true
 
       - name: Export the IPA
         if: steps.creds.outputs.signed == 'true'
