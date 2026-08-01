@@ -53,16 +53,19 @@ export function QrScanModal({ visible, onClose, onScanned }: QrScanModalProps) {
             <Pressable onPress={onClose} hitSlop={10} style={styles.closeButton}>
               <X size={24} color="#ffffff" />
             </Pressable>
-            <Text style={styles.title}>Scan QR code</Text>
+            <Text style={styles.title}>Sign-in code</Text>
             <View style={styles.closeButton} />
           </View>
 
           {permission?.granted ? (
             <View style={styles.frameWrap}>
               <View style={styles.frame} />
-              <Text style={styles.hint}>
-                Point your camera at the QR code shown on the webmail settings screen.
-              </Text>
+              <View style={styles.hintWrap}>
+                <Text style={styles.hintTitle}>Open Bulwark on your computer</Text>
+                <Text style={styles.hint}>
+                  Settings → Devices → Add phone shows a code. Point the camera at it.
+                </Text>
+              </View>
             </View>
           ) : (
             <View style={styles.permissionWrap}>
@@ -105,11 +108,12 @@ function makeStyles(c: ThemePalette) {
       borderRadius: radius.lg,
       backgroundColor: 'transparent',
     },
+    hintWrap: { alignItems: 'center', gap: spacing.xs, paddingHorizontal: spacing.xxl },
+    hintTitle: { ...typography.bodySemibold, color: '#ffffff', textAlign: 'center' },
     hint: {
       ...typography.caption,
-      color: '#ffffff',
+      color: 'rgba(255,255,255,0.8)',
       textAlign: 'center',
-      paddingHorizontal: spacing.xxl,
     },
     permissionWrap: {
       flex: 1,

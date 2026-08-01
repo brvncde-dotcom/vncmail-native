@@ -1,0 +1,102 @@
+import React from 'react';
+import { View, Text, StyleSheet, ActivityIndicator, Image } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { spacing, radius, typography, type ThemePalette } from '../../theme/tokens';
+import { useColors, useResolvedTheme } from '../../theme/colors';
+
+// The white mark disappears on the light palette, so pick per theme.
+const LOGO_LIGHT = require('../../../assets/logos/Bulwark Logo Dark.png');
+const LOGO_DARK = require('../../../assets/logos/Bulwark Logo White.png');
+
+export type SigningInPhase = 'browser' | 'connecting' | 'pairing';
+
+interface SigningInStepProps {
+  phase: SigningInPhase;
+  serverUrl: string | null;
+  email: string | null;
+}
+
+function hostOf(url: string | null): string {
+  if (!url) return 'your server';
+  return url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').split('/')[0];
+}
+
+function initialsOf(email: string): string {
+  const local = email.replace(/@.*$/, '');
+  const parts = local.split(/[.\s_-]+/).filter(Boolean);
+  const letters = parts.slice(0, 2).map((part) => part[0]);
+  return (letters.join('') || local[0] || '?').toUpperCase();
+}
+
+/**
+ * Covers the wait while a sign-in is in flight. Naming the server and the
+ * current stage makes a slow first connection legible instead of a bare
+ * spinner that could mean anything.
+ */
+export default function SigningInStep({ phase, serverUrl, email }: SigningInStepProps) {
+  const c = useColors();
+  const theme = useResolvedTheme();
+  const styles = React.useMemo(() => makeStyles(c), [c]);
+  const host = hostOf(serverUrl);
+
+  const copy: Record<SigningInPhase, { title: string; detail: string }> = {
+    browser: {
+      title: `Opening ${host}`,
+      detail: 'Finish signing in on the page that just opened. We’ll take it from there.',
+    },
+    connecting: { title: `Connecting to ${host}`, detail: 'Setting up your mailbox…' },
+    pairing: { title: 'Redeeming your sign-in code', detail: `Pairing this device with ${host}…` },
+  };
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <View style={styles.content}>
+        {email ? (
+          <View style={styles.avatar}>
+            <Text style={styles.avatarText}>{initialsOf(email)}</Text>
+          </View>
+        ) : (
+          <Image
+            source={theme === 'light' ? LOGO_LIGHT : LOGO_DARK}
+            style={styles.logo}
+            resizeMode="contain"
+          />
+        )}
+
+        {email ? <Text style={styles.email}>{email}</Text> : null}
+        <Text style={styles.title}>{copy[phase].title}</Text>
+        <Text style={styles.detail}>{copy[phase].detail}</Text>
+
+        <ActivityIndicator size="small" color={c.primary} style={styles.spinner} />
+      </View>
+    </SafeAreaView>
+  );
+}
+
+function makeStyles(c: ThemePalette) {
+  return StyleSheet.create({
+    container: { flex: 1, backgroundColor: c.background },
+    content: {
+      flex: 1,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: spacing.xxl,
+      gap: spacing.xs,
+    },
+    avatar: {
+      width: 60,
+      height: 60,
+      borderRadius: radius.full,
+      backgroundColor: c.primary,
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginBottom: spacing.md,
+    },
+    avatarText: { ...typography.h2, color: c.primaryForeground },
+    logo: { width: 60, height: 60, marginBottom: spacing.md },
+    email: { ...typography.caption, color: c.textMuted },
+    title: { ...typography.h2, color: c.text, textAlign: 'center' },
+    detail: { ...typography.body, color: c.textSecondary, textAlign: 'center' },
+    spinner: { marginTop: spacing.xl },
+  });
+}

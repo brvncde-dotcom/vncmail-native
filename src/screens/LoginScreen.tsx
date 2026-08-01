@@ -1,16 +1,23 @@
 import React from 'react';
-import { View, Text, Pressable, StyleSheet, KeyboardAvoidingView, Platform, Image, Alert } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import Constants from 'expo-constants';
-import { Eye, EyeOff, X, QrCode } from 'lucide-react-native';
-import { spacing, radius, typography, componentSizes, type ThemePalette } from '../theme/tokens';
-import { useColors } from '../theme/colors';
-import { Button, Input } from '../components';
+import { BackHandler } from 'react-native';
+import { useAuthStore } from '../stores/auth-store';
+import { useAccountStore } from '../stores/account-store';
 import { QrScanModal } from '../components/QrScanModal';
 import { parseQrLoginPayload } from '../lib/oauth';
-import { useAuthStore } from '../stores/auth-store';
-
-const APP_VERSION = Constants.expoConfig?.version ?? '0.0.0';
+import {
+  discoverServerForEmail,
+  emailDomain,
+  isEmailAddress,
+  normalizeServerUrl,
+} from '../lib/server-discovery';
+import { describeLoginError, type LoginErrorCopy } from '../lib/login-errors';
+import LoginShell from './login/LoginShell';
+import ChooseStep from './login/ChooseStep';
+import EmailStep from './login/EmailStep';
+import ServerStep from './login/ServerStep';
+import ConfirmStep from './login/ConfirmStep';
+import PasswordStep from './login/PasswordStep';
+import SigningInStep, { type SigningInPhase } from './login/SigningInStep';
 
 interface LoginScreenProps {
   onLogin?: () => void;
@@ -18,288 +25,349 @@ interface LoginScreenProps {
   onCancel?: () => void;
 }
 
-export default function LoginScreen({ onLogin, isAddMode, onCancel }: LoginScreenProps) {
-  const c = useColors();
-  const styles = React.useMemo(() => makeStyles(c), [c]);
+type StepName = 'choose' | 'email' | 'server' | 'confirm' | 'password';
+
+/**
+ * Sign-in, one question per screen, cheapest question first.
+ *
+ * The routes that need no server address — a paired QR code, or an email we
+ * can discover a server from — come first; the manual server + password form
+ * is the fallback rather than the greeting. Every step drives one of the
+ * existing auth-store actions, so the credential handling below is unchanged
+ * from the single-form version this replaced.
+ */
+export default function LoginScreen({ onLogin, isAddMode = false, onCancel }: LoginScreenProps) {
   const login = useAuthStore((state) => state.login);
   const loginViaWebmail = useAuthStore((state) => state.loginViaWebmail);
   const loginViaPairing = useAuthStore((state) => state.loginViaPairing);
-  const isLoading = useAuthStore((state) => state.isLoading);
-  const error = useAuthStore((state) => state.error);
   const clearError = useAuthStore((state) => state.clearError);
+  const storeError = useAuthStore((state) => state.error);
 
-  const [serverUrl, setServerUrl] = React.useState('');
+  const accounts = useAccountStore((state) => state.accounts);
+  const activeAccountId = useAccountStore((state) => state.activeAccountId);
+
+  const [step, setStep] = React.useState<StepName>('choose');
+  const [history, setHistory] = React.useState<StepName[]>([]);
   const [email, setEmail] = React.useState('');
+  const [serverInput, setServerInput] = React.useState('');
+  const [serverUrl, setServerUrl] = React.useState('');
   const [password, setPassword] = React.useState('');
-  const [showPassword, setShowPassword] = React.useState(false);
+  const [failedDomain, setFailedDomain] = React.useState<string | null>(null);
+  const [notice, setNotice] = React.useState<LoginErrorCopy | null>(null);
+  const [searching, setSearching] = React.useState(false);
+  const [busy, setBusy] = React.useState<SigningInPhase | null>(null);
   const [scannerVisible, setScannerVisible] = React.useState(false);
 
-  const canSubmit = Boolean(serverUrl.trim() && email.trim() && password);
-  const canHandoff = Boolean(serverUrl.trim());
+  // Servers we already hold credentials for. Discovery trusts these without a
+  // probe, which makes "second account on the same host" instant.
+  const knownServerUrls = React.useMemo(() => accounts.map((a) => a.serverUrl), [accounts]);
+  const knownServerUrl = React.useMemo(() => {
+    const active = accounts.find((a) => a.id === activeAccountId);
+    return active?.serverUrl ?? accounts[0]?.serverUrl ?? null;
+  }, [accounts, activeAccountId]);
 
-  const handleLogin = async () => {
-    if (!canSubmit) {
-      return;
-    }
-
-    try {
-      await login(serverUrl.trim(), email.trim(), password, { addAccount: isAddMode });
-      onLogin?.();
-    } catch {
-      // Store state already contains the user-facing error.
-    }
-  };
-
-  const handleWebmailHandoff = async () => {
-    if (!canHandoff) return;
-    try {
-      const before = useAuthStore.getState().isAuthenticated;
-      await loginViaWebmail(serverUrl.trim(), { addAccount: isAddMode });
-      // loginViaWebmail swallows the "user cancelled the browser" case
-      // silently — only fire the navigation hook when authentication
-      // actually completed.
-      const after = useAuthStore.getState().isAuthenticated;
-      if (after && !before) {
-        onLogin?.();
-      } else if (isAddMode && after) {
-        onLogin?.();
-      }
-    } catch {
-      // Store state already contains the user-facing error.
-    }
-  };
-
-  const handleScanned = async (data: string) => {
-    setScannerVisible(false);
-    const payload = parseQrLoginPayload(data);
-    if (!payload) {
-      Alert.alert('Unrecognized QR code', "That QR code isn't a Bulwark Mail sign-in code.");
-      return;
-    }
-    try {
-      const before = useAuthStore.getState().isAuthenticated;
-      if (payload.kind === 'connect') {
-        // Server-bootstrap QR: fill the field and run the normal browser
-        // handoff so the user still authenticates in the webmail.
-        setServerUrl(payload.webmailUrl);
-        await loginViaWebmail(payload.webmailUrl, { addAccount: isAddMode });
-      } else {
-        // Cross-device pairing QR: redeem the one-time code for tokens, no
-        // browser round-trip needed.
-        await loginViaPairing(payload.webmailUrl, payload.code, { addAccount: isAddMode });
-      }
-      const after = useAuthStore.getState().isAuthenticated;
-      if ((after && !before) || (isAddMode && after)) {
-        onLogin?.();
-      }
-    } catch {
-      // Store state already contains the user-facing error.
-    }
-  };
-
-  const updateField = React.useCallback(
-    (setter: React.Dispatch<React.SetStateAction<string>>) => (value: string) => {
-      if (useAuthStore.getState().error) {
-        clearError();
-      }
-      setter(value);
+  const goTo = React.useCallback(
+    (next: StepName) => {
+      clearError();
+      setNotice(null);
+      setHistory((prev) => [...prev, step]);
+      setStep(next);
     },
-    [clearError],
+    [clearError, step],
   );
 
-  const onChangeServerUrl = React.useMemo(() => updateField(setServerUrl), [updateField]);
-  const onChangeEmail = React.useMemo(() => updateField(setEmail), [updateField]);
-  const onChangePassword = React.useMemo(() => updateField(setPassword), [updateField]);
+  const goBack = React.useCallback(() => {
+    if (history.length === 0) return;
+    clearError();
+    setNotice(null);
+    setStep(history[history.length - 1]);
+    setHistory((prev) => prev.slice(0, -1));
+  }, [clearError, history]);
+
+  // Android hardware back mirrors the on-screen back: one step at a time, and
+  // out of the flow entirely from the first step.
+  React.useEffect(() => {
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (busy || searching) return true;
+      if (scannerVisible) {
+        setScannerVisible(false);
+        return true;
+      }
+      if (history.length > 0) {
+        goBack();
+        return true;
+      }
+      if (isAddMode && onCancel) {
+        onCancel();
+        return true;
+      }
+      return false;
+    });
+    return () => subscription.remove();
+  }, [busy, searching, scannerVisible, history.length, goBack, isAddMode, onCancel]);
+
+  // ── flows ──────────────────────────────────────────────
+
+  const finishIfSignedIn = React.useCallback(
+    (wasAuthenticated: boolean) => {
+      const isAuthenticated = useAuthStore.getState().isAuthenticated;
+      // In add mode the store was already authenticated before we started, so
+      // the before/after comparison can't be the only signal.
+      if ((isAuthenticated && !wasAuthenticated) || (isAddMode && isAuthenticated)) {
+        onLogin?.();
+        return true;
+      }
+      return false;
+    },
+    [isAddMode, onLogin],
+  );
+
+  const runHandoff = React.useCallback(
+    async (target: string) => {
+      setNotice(null);
+      setBusy('browser');
+      const wasAuthenticated = useAuthStore.getState().isAuthenticated;
+      try {
+        await loginViaWebmail(target, { addAccount: isAddMode });
+        // loginViaWebmail resolves quietly when the user closes the browser —
+        // that's a cancellation, not a failure, so leave them where they were.
+        finishIfSignedIn(wasAuthenticated);
+      } catch (err) {
+        setNotice(describeLoginError(err, { serverUrl: target }));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [finishIfSignedIn, isAddMode, loginViaWebmail],
+  );
+
+  const handleEmailContinue = React.useCallback(async () => {
+    const value = email.trim();
+    if (!isEmailAddress(value)) {
+      setNotice({
+        title: 'Enter a full email address',
+        detail: 'Like ada@example.com. If you sign in with a username instead, use “I know my server address”.',
+      });
+      return;
+    }
+
+    setNotice(null);
+    setSearching(true);
+    try {
+      const found = await discoverServerForEmail(value, { knownServerUrls });
+      if (found) {
+        setServerUrl(found);
+        setServerInput(found);
+        goTo('confirm');
+      } else {
+        setFailedDomain(emailDomain(value));
+        setServerInput('');
+        goTo('server');
+      }
+    } finally {
+      setSearching(false);
+    }
+  }, [email, goTo, knownServerUrls]);
+
+  const handleServerContinue = React.useCallback(() => {
+    const normalized = normalizeServerUrl(serverInput);
+    if (!normalized) {
+      setNotice({
+        title: "That doesn't look like a server address",
+        detail: 'Try the address you use for webmail, like mail.example.com.',
+      });
+      return;
+    }
+    setServerUrl(normalized);
+    goTo('confirm');
+  }, [goTo, serverInput]);
+
+  const handlePasswordSubmit = React.useCallback(async () => {
+    const target = serverUrl || normalizeServerUrl(serverInput);
+    if (!target) {
+      setNotice({ title: 'We need a server address first' });
+      return;
+    }
+    if (!email.trim() || !password) {
+      setNotice({ title: 'Enter your email and password' });
+      return;
+    }
+
+    setNotice(null);
+    setBusy('connecting');
+    const wasAuthenticated = useAuthStore.getState().isAuthenticated;
+    try {
+      await login(target, email.trim(), password, { addAccount: isAddMode });
+      finishIfSignedIn(wasAuthenticated);
+    } catch (err) {
+      setNotice(describeLoginError(err, { serverUrl: target }));
+    } finally {
+      setBusy(null);
+    }
+  }, [email, finishIfSignedIn, isAddMode, login, password, serverInput, serverUrl]);
+
+  const handleScanned = React.useCallback(
+    async (data: string) => {
+      setScannerVisible(false);
+      const payload = parseQrLoginPayload(data);
+      if (!payload) {
+        setNotice({
+          title: "That code isn't a Bulwark sign-in code",
+          detail: 'Open Bulwark on the web, then Settings → Devices to show one.',
+        });
+        return;
+      }
+
+      if (payload.kind === 'connect') {
+        // Server-bootstrap code: it carries the address, the user still
+        // authenticates in the webmail.
+        setServerUrl(payload.webmailUrl);
+        setServerInput(payload.webmailUrl);
+        await runHandoff(payload.webmailUrl);
+        return;
+      }
+
+      // Cross-device pairing code: redeem it for tokens, no browser needed.
+      setNotice(null);
+      setBusy('pairing');
+      const wasAuthenticated = useAuthStore.getState().isAuthenticated;
+      try {
+        await loginViaPairing(payload.webmailUrl, payload.code, { addAccount: isAddMode });
+        finishIfSignedIn(wasAuthenticated);
+      } catch (err) {
+        setNotice(describeLoginError(err, { serverUrl: payload.webmailUrl }));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [finishIfSignedIn, isAddMode, loginViaPairing, runHandoff],
+  );
+
+  // ── render ─────────────────────────────────────────────
+
+  if (busy) {
+    return (
+      <SigningInStep
+        phase={busy}
+        serverUrl={serverUrl || knownServerUrl}
+        email={email.trim() || null}
+      />
+    );
+  }
+
+  const canGoBack = history.length > 0;
+  const shellProps = {
+    onBack: canGoBack ? goBack : undefined,
+    onClose: isAddMode && onCancel ? onCancel : undefined,
+  };
+
+  if (step === 'choose') {
+    // A leftover store error ("Session expired") is the reason some people
+    // land back here, so it belongs on this screen.
+    const chooseNotice = notice ?? (storeError ? { title: storeError } : null);
+    return (
+      <>
+        <LoginShell {...shellProps} centered showFooter>
+          <ChooseStep
+            isAddMode={isAddMode}
+            accounts={accounts}
+            knownServerUrl={isAddMode ? knownServerUrl : null}
+            notice={chooseNotice}
+            onScan={() => setScannerVisible(true)}
+            onUseEmail={() => goTo('email')}
+            onUseKnownServer={() => {
+              if (!knownServerUrl) return;
+              setServerUrl(knownServerUrl);
+              setServerInput(knownServerUrl);
+              goTo('confirm');
+            }}
+            onManualSetup={() => {
+              setFailedDomain(null);
+              goTo('server');
+            }}
+          />
+        </LoginShell>
+        <QrScanModal
+          visible={scannerVisible}
+          onClose={() => setScannerVisible(false)}
+          onScanned={(data) => void handleScanned(data)}
+        />
+      </>
+    );
+  }
 
   return (
-    <SafeAreaView style={styles.container}>
-      {isAddMode && onCancel ? (
-        <Pressable onPress={onCancel} style={styles.cancelButton} hitSlop={10}>
-          <X size={24} color={c.text} />
-        </Pressable>
-      ) : null}
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={styles.keyboardView}
-      >
-        <View style={styles.content}>
-          {/* Logo & Branding */}
-          <View style={styles.branding}>
-            <View style={styles.logoContainer}>
-              <Image
-                source={require('../../assets/logos/Bulwark Logo White.png')}
-                style={styles.logoImage}
-                resizeMode="contain"
-              />
-            </View>
-            <Text style={styles.appName}>{isAddMode ? 'Add account' : 'Bulwark Mail'}</Text>
-            <Text style={styles.tagline}>
-              {isAddMode ? 'Sign in to a second account' : 'Secure. Private. Yours.'}
-            </Text>
-          </View>
+    <>
+      <LoginShell {...shellProps}>
+        {step === 'email' ? (
+          <EmailStep
+            isAddMode={isAddMode}
+            value={email}
+            onChange={(value) => {
+              setNotice(null);
+              setEmail(value);
+            }}
+            onSubmit={() => void handleEmailContinue()}
+            onKnowServer={() => {
+              setFailedDomain(null);
+              goTo('server');
+            }}
+            isSearching={searching}
+            notice={notice}
+          />
+        ) : null}
 
-          {/* Login Form */}
-          <View style={styles.form}>
-            <Input
-              label="Server URL"
-              placeholder="https://mail.example.com"
-              value={serverUrl}
-              onChangeText={onChangeServerUrl}
-              autoCapitalize="none"
-              keyboardType="url"
-              autoCorrect={false}
-            />
+        {step === 'server' ? (
+          <ServerStep
+            value={serverInput}
+            onChange={(value) => {
+              setNotice(null);
+              setServerInput(value);
+            }}
+            onSubmit={handleServerContinue}
+            onScan={() => setScannerVisible(true)}
+            failedDomain={failedDomain}
+            notice={notice}
+          />
+        ) : null}
 
-            <Input
-              label="Email or Username"
-              placeholder="you@example.com"
-              value={email}
-              onChangeText={onChangeEmail}
-              autoCapitalize="none"
-              keyboardType="email-address"
-              autoCorrect={false}
-            />
+        {step === 'confirm' ? (
+          <ConfirmStep
+            serverUrl={serverUrl}
+            onContinue={() => void runHandoff(serverUrl)}
+            onChangeServer={() => {
+              setFailedDomain(null);
+              goTo('server');
+            }}
+            onUsePassword={() => goTo('password')}
+            notice={notice}
+          />
+        ) : null}
 
-            <Input
-              label="Password"
-              placeholder="Enter your password"
-              value={password}
-              onChangeText={onChangePassword}
-              secureTextEntry={!showPassword}
-              onSubmitEditing={() => {
-                void handleLogin();
-              }}
-              rightIcon={
-                <Pressable onPress={() => setShowPassword(!showPassword)}>
-                  {showPassword ? (
-                    <EyeOff size={20} color={c.textMuted} />
-                  ) : (
-                    <Eye size={20} color={c.textMuted} />
-                  )}
-                </Pressable>
-              }
-            />
-
-            <Button
-              variant="default"
-              size="lg"
-              onPress={() => {
-                void handleLogin();
-              }}
-              disabled={!canSubmit}
-              loading={isLoading}
-              style={styles.loginButton}
-            >
-              {isLoading ? 'Signing in...' : 'Sign In'}
-            </Button>
-
-            {error ? <Text style={styles.errorText}>{error}</Text> : null}
-
-            {/* OAuth divider */}
-            <View style={styles.divider}>
-              <View style={styles.dividerLine} />
-              <Text style={styles.dividerText}>or continue with</Text>
-              <View style={styles.dividerLine} />
-            </View>
-
-            {/* Webmail-mediated login */}
-            <View style={styles.oauthRow}>
-              <Button
-                variant="outline"
-                size="md"
-                onPress={() => {
-                  void handleWebmailHandoff();
-                }}
-                disabled={!canHandoff || isLoading}
-              >
-                Sign in via webmail
-              </Button>
-              <Button
-                variant="ghost"
-                size="md"
-                onPress={() => setScannerVisible(true)}
-                disabled={isLoading}
-                icon={<QrCode size={18} color={c.text} />}
-              >
-                Scan QR code
-              </Button>
-            </View>
-          </View>
-
-          {/* Footer */}
-          <View style={styles.footer}>
-            <Text style={styles.footerText}>Bulwark Mobile v{APP_VERSION}</Text>
-            <Text style={styles.footerLink}>Privacy Policy</Text>
-          </View>
-        </View>
-      </KeyboardAvoidingView>
+        {step === 'password' ? (
+          <PasswordStep
+            serverUrl={serverUrl}
+            email={email}
+            password={password}
+            onChangeEmail={(value) => {
+              setNotice(null);
+              setEmail(value);
+            }}
+            onChangePassword={(value) => {
+              setNotice(null);
+              setPassword(value);
+            }}
+            onSubmit={() => void handlePasswordSubmit()}
+            notice={notice}
+          />
+        ) : null}
+      </LoginShell>
 
       <QrScanModal
         visible={scannerVisible}
         onClose={() => setScannerVisible(false)}
-        onScanned={(data) => {
-          void handleScanned(data);
-        }}
+        onScanned={(data) => void handleScanned(data)}
       />
-    </SafeAreaView>
+    </>
   );
-}
-
-function makeStyles(c: ThemePalette) {
-  return StyleSheet.create({
-  container: { flex: 1, backgroundColor: c.background },
-  cancelButton: {
-    position: 'absolute',
-    top: 50,
-    left: 16,
-    zIndex: 10,
-    padding: 8,
-  },
-  keyboardView: { flex: 1 },
-  content: {
-    flex: 1,
-    justifyContent: 'center',
-    paddingHorizontal: spacing.xxl,
-  },
-  branding: { alignItems: 'center', marginBottom: 40 },
-  logoContainer: {
-    width: 80,
-    height: 80,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: spacing.lg,
-  },
-  logoImage: {
-    width: 72,
-    height: 72,
-  },
-  appName: { ...typography.h1, color: c.text },
-  tagline: { ...typography.caption, color: c.textMuted, marginTop: spacing.xs },
-
-  form: { gap: spacing.lg },
-
-  loginButton: {
-    marginTop: spacing.sm,
-  },
-  errorText: {
-    ...typography.caption,
-    color: c.error,
-    textAlign: 'center',
-  },
-
-  divider: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginVertical: spacing.md,
-    gap: spacing.md,
-  },
-  dividerLine: { flex: 1, height: 1, backgroundColor: c.border },
-  dividerText: { ...typography.caption, color: c.textMuted },
-
-  oauthRow: { gap: spacing.md },
-
-  footer: { alignItems: 'center', marginTop: 40, gap: spacing.xs },
-  footerText: { ...typography.caption, color: c.textMuted },
-  footerLink: { ...typography.caption, color: c.textLink },
-  });
 }

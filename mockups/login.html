@@ -1,0 +1,953 @@
+<title>Bulwark Mobile — Sign-in redesign</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-qr" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" />
+      <rect x="3" y="14" width="7" height="7" rx="1" /><path d="M14 14h3v3h-3z" /><path d="M21 14v3M21 21h-4" />
+    </symbol>
+    <symbol id="i-mail" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2" y="4" width="20" height="16" rx="2" /><path d="m2 7 10 6 10-6" />
+    </symbol>
+    <symbol id="i-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m9 18 6-6-6-6" />
+    </symbol>
+    <symbol id="i-back" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m15 18-6-6 6-6" />
+    </symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="4" y="10" width="16" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" />
+    </symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18" />
+    </symbol>
+    <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m4 12 5 5L20 6" />
+    </symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9" /><path d="M12 7v6M12 16.5v.5" />
+    </symbol>
+    <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M6 6 18 18M18 6 6 18" />
+    </symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12Z" /><circle cx="12" cy="12" r="2.6" />
+    </symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3 5 6v6c0 4.2 2.9 7.6 7 9 4.1-1.4 7-4.8 7-9V6l-7-3Z" />
+    </symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 5v14M5 12h14" />
+    </symbol>
+    <symbol id="i-key" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="7.5" cy="15.5" r="4.5" /><path d="m10.8 12.2 8-8M17 6l2.5 2.5M14.5 8.5 17 11" />
+    </symbol>
+  </defs>
+</svg>
+
+<style>
+  :root {
+    --page-bg: #fbfbfc;
+    --page-panel: #f0f3f8;
+    --page-ink: #14171f;
+    --page-ink-2: #545c6b;
+    --page-ink-3: #8a919f;
+    --page-rule: #e1e6ef;
+    --accent: #2f6fed;
+    --accent-soft: rgba(47, 111, 237, 0.09);
+
+    --app-bg: #ffffff;
+    --app-surface: #f8fafc;
+    --app-surface-2: #f1f5f9;
+    --app-border: #e2e8f0;
+    --app-text: #0f172a;
+    --app-text-2: #64748b;
+    --app-muted: #94a3b8;
+    --app-primary: #3b82f6;
+    --app-primary-bg: #dbeafe;
+    --app-error: #ef4444;
+    --app-error-bg: #fee2e2;
+    --app-success: #16a34a;
+
+    --frame: #d5dae5;
+    --frame-shadow: rgba(20, 26, 40, 0.14);
+
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+    --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page-bg: #0a0b0d;
+      --page-panel: #111319;
+      --page-ink: #eef1f6;
+      --page-ink-2: #a4adbb;
+      --page-ink-3: #6e7684;
+      --page-rule: #22262f;
+      --accent: #74aaff;
+      --accent-soft: rgba(116, 170, 255, 0.12);
+
+      --app-bg: #09090b;
+      --app-surface: #18181b;
+      --app-surface-2: #1f1f23;
+      --app-border: #27272a;
+      --app-text: #fafafa;
+      --app-text-2: #a1a1aa;
+      --app-muted: #71717a;
+      --app-primary: #3b82f6;
+      --app-primary-bg: #172554;
+      --app-error: #ef4444;
+      --app-error-bg: #450a0a;
+      --app-success: #22c55e;
+
+      --frame: #2b303a;
+      --frame-shadow: rgba(0, 0, 0, 0.55);
+    }
+  }
+
+  :root[data-theme="light"] {
+    --page-bg: #fbfbfc; --page-panel: #f0f3f8; --page-ink: #14171f; --page-ink-2: #545c6b;
+    --page-ink-3: #8a919f; --page-rule: #e1e6ef; --accent: #2f6fed; --accent-soft: rgba(47,111,237,0.09);
+    --app-bg: #ffffff; --app-surface: #f8fafc; --app-surface-2: #f1f5f9; --app-border: #e2e8f0;
+    --app-text: #0f172a; --app-text-2: #64748b; --app-muted: #94a3b8; --app-primary: #3b82f6;
+    --app-primary-bg: #dbeafe; --app-error: #ef4444; --app-error-bg: #fee2e2; --app-success: #16a34a;
+    --frame: #d5dae5; --frame-shadow: rgba(20,26,40,0.14);
+  }
+  :root[data-theme="dark"] {
+    --page-bg: #0a0b0d; --page-panel: #111319; --page-ink: #eef1f6; --page-ink-2: #a4adbb;
+    --page-ink-3: #6e7684; --page-rule: #22262f; --accent: #74aaff; --accent-soft: rgba(116,170,255,0.12);
+    --app-bg: #09090b; --app-surface: #18181b; --app-surface-2: #1f1f23; --app-border: #27272a;
+    --app-text: #fafafa; --app-text-2: #a1a1aa; --app-muted: #71717a; --app-primary: #3b82f6;
+    --app-primary-bg: #172554; --app-error: #ef4444; --app-error-bg: #450a0a; --app-success: #22c55e;
+    --frame: #2b303a; --frame-shadow: rgba(0,0,0,0.55);
+  }
+
+  body {
+    background: var(--page-bg);
+    color: var(--page-ink);
+    font-family: var(--serif);
+    font-size: 17px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .d-wrap { max-width: 1180px; margin: 0 auto; padding: 64px 28px 96px; }
+
+  /* ---------- document typography ---------- */
+  .d-eyebrow {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--page-ink-3); margin: 0 0 18px;
+  }
+  .d-title {
+    font-family: var(--sans); font-weight: 700; font-size: clamp(34px, 5vw, 52px);
+    line-height: 1.04; letter-spacing: -0.028em; margin: 0; text-wrap: balance;
+  }
+  .d-deck {
+    max-width: 62ch; margin: 22px 0 0; font-size: 19px; line-height: 1.62; color: var(--page-ink-2);
+  }
+  .d-deck strong { color: var(--page-ink); font-weight: 600; }
+
+  .d-section { margin-top: 84px; }
+  .d-h2 {
+    font-family: var(--sans); font-weight: 700; font-size: 25px; letter-spacing: -0.018em;
+    margin: 0; text-wrap: balance;
+  }
+  .d-lede { max-width: 62ch; margin: 12px 0 0; color: var(--page-ink-2); }
+  .d-rule { height: 1px; background: var(--page-rule); border: 0; margin: 26px 0 34px; }
+
+  .d-meta {
+    display: flex; flex-wrap: wrap; gap: 8px 10px; margin-top: 30px;
+    font-family: var(--mono); font-size: 11.5px; color: var(--page-ink-2);
+  }
+  .d-meta span {
+    border: 1px solid var(--page-rule); border-radius: 999px; padding: 4px 11px; background: var(--page-panel);
+  }
+
+  /* ---------- comparison ---------- */
+  .d-compare {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 1px;
+    background: var(--page-rule); border: 1px solid var(--page-rule); border-radius: 12px; overflow: hidden;
+  }
+  .d-cell { background: var(--page-bg); padding: 20px 22px; }
+  .d-cell dt {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--page-ink-3); margin: 0 0 10px;
+  }
+  .d-cell dd { margin: 0; font-family: var(--sans); font-size: 15px; line-height: 1.45; }
+  .d-was { color: var(--page-ink-3); text-decoration: line-through; text-decoration-thickness: 1px; }
+  .d-now { color: var(--page-ink); font-weight: 600; display: block; margin-top: 3px; }
+
+  /* ---------- filmstrip ---------- */
+  .d-strip {
+    display: flex; gap: 30px; overflow-x: auto; padding: 30px 26px 26px;
+    background: var(--page-panel); border-radius: 16px; scroll-snap-type: x proximity;
+  }
+  .d-strip figure { margin: 0; scroll-snap-align: center; flex: 0 0 auto; width: 288px; }
+  .d-strip figcaption { margin-top: 18px; }
+  .d-step {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--accent); display: block; margin-bottom: 5px;
+  }
+  .d-step.is-alt { color: var(--page-ink-3); }
+  .d-cap-title { font-family: var(--sans); font-weight: 650; font-size: 15.5px; letter-spacing: -0.01em; }
+  .d-cap-body { font-size: 14.5px; line-height: 1.5; color: var(--page-ink-2); margin: 5px 0 0; }
+
+  /* ---------- notes ---------- */
+  .d-notes { list-style: none; padding: 0; margin: 0; display: grid; gap: 22px; max-width: 74ch; }
+  .d-notes li { display: grid; grid-template-columns: 26px 1fr; gap: 14px; align-items: start; }
+  .d-notes svg { width: 18px; height: 18px; color: var(--accent); margin-top: 4px; }
+  .d-note-h { font-family: var(--sans); font-weight: 650; font-size: 15.5px; }
+  .d-note-b { color: var(--page-ink-2); font-size: 16px; }
+  code {
+    font-family: var(--mono); font-size: 0.85em; background: var(--accent-soft);
+    color: var(--accent); padding: 1.5px 5px; border-radius: 4px;
+  }
+
+  .d-foot {
+    margin-top: 80px; padding-top: 22px; border-top: 1px solid var(--page-rule);
+    font-family: var(--mono); font-size: 11.5px; color: var(--page-ink-3);
+  }
+
+  /* ================= phone chrome ================= */
+  .p {
+    width: 288px; height: 600px; border-radius: 36px; background: var(--frame);
+    padding: 8px; box-shadow: 0 18px 44px -18px var(--frame-shadow); position: relative;
+  }
+  .p-screen {
+    width: 100%; height: 100%; border-radius: 29px; background: var(--app-bg); overflow: hidden;
+    position: relative; font-family: var(--sans); color: var(--app-text); font-size: 14px; line-height: 1.4;
+    display: flex; flex-direction: column;
+  }
+  .p-notch {
+    position: absolute; top: 15px; left: 50%; transform: translateX(-50%); width: 74px; height: 5px;
+    border-radius: 99px; background: var(--app-border); z-index: 6;
+  }
+  .p-pad { padding: 42px 24px 22px; flex: 1; display: flex; flex-direction: column; }
+  .p-pad.is-centered { justify-content: center; }
+
+  /* ---- in-app primitives ---- */
+  .s-logo {
+    width: 56px; height: 56px; border-radius: 17px; background: var(--app-primary);
+    display: grid; place-items: center; margin: 0 auto 16px; color: #fff;
+  }
+  .s-logo svg { width: 30px; height: 30px; }
+  .s-brand { text-align: center; margin-bottom: 30px; }
+  .s-brand h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; margin: 0; }
+  .s-brand p { font-size: 12.5px; color: var(--app-muted); margin: 5px 0 0; }
+
+  .s-h { font-size: 21px; font-weight: 700; letter-spacing: -0.022em; margin: 0; line-height: 1.22; }
+  .s-sub { font-size: 13px; color: var(--app-text-2); margin: 8px 0 0; line-height: 1.45; }
+
+  .s-tile {
+    display: flex; align-items: center; gap: 13px; width: 100%; text-align: left;
+    border: 1px solid var(--app-border); background: var(--app-surface);
+    border-radius: 14px; padding: 14px 15px; color: inherit;
+  }
+  .s-tile.is-primary { background: var(--app-primary); border-color: var(--app-primary); color: #fff; }
+  .s-tile-ico { width: 22px; height: 22px; flex: 0 0 22px; opacity: 0.95; }
+  .s-tile-txt { flex: 1; min-width: 0; }
+  .s-tile-t { font-size: 14.5px; font-weight: 600; letter-spacing: -0.005em; }
+  .s-tile-d { font-size: 11.5px; opacity: 0.72; margin-top: 2px; }
+  .s-tile-chev { width: 16px; height: 16px; opacity: 0.5; }
+
+  .s-stack { display: flex; flex-direction: column; gap: 10px; }
+
+  .s-field { margin-top: 20px; }
+  .s-label { font-size: 12px; font-weight: 600; color: var(--app-text-2); margin-bottom: 7px; }
+  .s-input {
+    border: 1px solid var(--app-border); background: var(--app-bg); border-radius: 10px;
+    height: 42px; padding: 0 13px; display: flex; align-items: center; gap: 8px; font-size: 14px;
+  }
+  .s-input.is-focus { border-color: var(--app-primary); box-shadow: 0 0 0 3px var(--app-primary-bg); }
+  .s-input.is-error { border-color: var(--app-error); }
+  .s-input .s-ph { color: var(--app-muted); }
+  .s-input svg { width: 17px; height: 17px; color: var(--app-muted); flex: 0 0 17px; }
+  .s-caret {
+    width: 1.5px; height: 17px; background: var(--app-primary); display: inline-block;
+    animation: blink 1.05s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .s-caret { animation: none; } }
+
+  .s-hint { font-size: 11.5px; color: var(--app-muted); margin-top: 8px; line-height: 1.45; }
+  .s-hint.is-error { color: var(--app-error); }
+
+  .s-btn {
+    height: 46px; border-radius: 12px; background: var(--app-primary); color: #fff;
+    display: grid; place-items: center; font-size: 15px; font-weight: 600; margin-top: 20px;
+  }
+  .s-btn.is-off { background: var(--app-surface-2); color: var(--app-muted); }
+  .s-btn.is-quiet {
+    background: transparent; color: var(--app-text); border: 1px solid var(--app-border); font-weight: 500;
+  }
+  .s-link { text-align: center; font-size: 13px; color: var(--app-primary); margin-top: 16px; font-weight: 500; }
+  .s-link.is-muted { color: var(--app-muted); font-weight: 400; }
+
+  .s-back { width: 22px; height: 22px; color: var(--app-text-2); margin-bottom: 22px; }
+  .s-foot {
+    text-align: center; font-size: 11px; color: var(--app-muted); padding: 0 0 8px; line-height: 1.6;
+  }
+
+  .s-card {
+    border: 1px solid var(--app-border); background: var(--app-surface); border-radius: 14px;
+    padding: 15px; display: flex; align-items: center; gap: 12px; margin-top: 22px;
+  }
+  .s-card-ico {
+    width: 38px; height: 38px; border-radius: 11px; background: var(--app-primary-bg);
+    color: var(--app-primary); display: grid; place-items: center; flex: 0 0 38px;
+  }
+  .s-card-ico svg { width: 19px; height: 19px; }
+  .s-card-t { font-size: 14.5px; font-weight: 600; }
+  .s-card-d { font-size: 11.5px; color: var(--app-text-2); margin-top: 2px; display: flex; align-items: center; gap: 5px; }
+  .s-dot { width: 5px; height: 5px; border-radius: 99px; background: var(--app-success); display: inline-block; }
+
+  .s-note {
+    display: flex; gap: 9px; align-items: flex-start; margin-top: 16px;
+    font-size: 11.5px; color: var(--app-text-2); line-height: 1.5;
+  }
+  .s-note svg { width: 15px; height: 15px; flex: 0 0 15px; margin-top: 1px; color: var(--app-muted); }
+
+  .s-banner {
+    display: flex; gap: 9px; align-items: flex-start; border-radius: 11px; padding: 11px 12px;
+    background: var(--app-error-bg); font-size: 12px; line-height: 1.45; margin-top: 18px;
+  }
+  .s-banner svg { width: 15px; height: 15px; flex: 0 0 15px; margin-top: 1px; color: var(--app-error); }
+
+  .s-divider { display: flex; align-items: center; gap: 12px; margin: 18px 0; }
+  .s-divider::before, .s-divider::after { content: ""; height: 1px; flex: 1; background: var(--app-border); }
+  .s-divider span { font-size: 11.5px; color: var(--app-muted); }
+
+  /* progress rows (setting up) */
+  .s-prog { display: flex; align-items: center; gap: 11px; padding: 11px 0; font-size: 13.5px; }
+  .s-prog .s-tick {
+    width: 20px; height: 20px; border-radius: 99px; background: var(--app-success);
+    color: #fff; display: grid; place-items: center; flex: 0 0 20px;
+  }
+  .s-prog .s-tick svg { width: 11px; height: 11px; }
+  .s-prog .s-spin {
+    width: 20px; height: 20px; border-radius: 99px; flex: 0 0 20px;
+    border: 2px solid var(--app-border); border-top-color: var(--app-primary); animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .s-prog .s-spin { animation: none; } }
+  .s-prog.is-pending { color: var(--app-muted); }
+
+  /* account rows (add mode) */
+  .s-acct { display: flex; align-items: center; gap: 11px; padding: 11px 0; }
+  .s-av {
+    width: 34px; height: 34px; border-radius: 99px; display: grid; place-items: center;
+    font-size: 13px; font-weight: 600; color: #fff; flex: 0 0 34px;
+  }
+  .s-acct-t { font-size: 14px; font-weight: 550; }
+  .s-acct-d { font-size: 11.5px; color: var(--app-muted); }
+
+  /* scanner — deliberately always dark, it's a camera view */
+  .p-screen.is-camera { background: #0b0d10; color: #fff; }
+  .s-cam { position: absolute; inset: 0; background:
+      radial-gradient(120% 80% at 50% 30%, #2a3038 0%, #14171c 55%, #0b0d10 100%); }
+  .s-cam-grid { position: absolute; inset: 0; opacity: 0.18; background-image:
+      linear-gradient(rgba(255,255,255,0.5) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.5) 1px, transparent 1px); background-size: 34px 34px; }
+  .s-reticle { position: absolute; top: 168px; left: 50%; transform: translateX(-50%); width: 176px; height: 176px; }
+  .s-reticle i {
+    position: absolute; width: 34px; height: 34px; border: 3px solid #fff; border-radius: 4px;
+  }
+  .s-reticle i:nth-child(1) { top: 0; left: 0; border-right: 0; border-bottom: 0; }
+  .s-reticle i:nth-child(2) { top: 0; right: 0; border-left: 0; border-bottom: 0; }
+  .s-reticle i:nth-child(3) { bottom: 0; left: 0; border-right: 0; border-top: 0; }
+  .s-reticle i:nth-child(4) { bottom: 0; right: 0; border-left: 0; border-top: 0; }
+  .s-qr {
+    position: absolute; inset: 22px; border-radius: 6px; background: #fff;
+    display: grid; grid-template-columns: repeat(9, 1fr); grid-template-rows: repeat(9, 1fr); padding: 8px; gap: 2px;
+  }
+  .s-qr b { background: #0b0d10; border-radius: 1px; }
+  .s-cam-top {
+    position: absolute; top: 40px; left: 0; right: 0; display: flex; align-items: center;
+    justify-content: space-between; padding: 0 20px; z-index: 3;
+  }
+  .s-cam-top svg { width: 22px; height: 22px; color: #fff; }
+  .s-cam-copy { position: absolute; left: 0; right: 0; bottom: 46px; text-align: center; padding: 0 30px; z-index: 3; }
+  .s-cam-copy p { margin: 0; font-size: 13px; line-height: 1.5; color: rgba(255,255,255,0.82); }
+  .s-cam-copy .s-cam-h { font-size: 15.5px; font-weight: 600; color: #fff; margin-bottom: 6px; }
+  .s-cam-copy .s-cam-link { margin-top: 18px; font-size: 13px; font-weight: 500; color: #8ab4ff; }
+
+  /* browser handoff sheet */
+  .s-sheet {
+    position: absolute; inset: 26px 0 0; background: var(--app-bg); border-radius: 18px 18px 0 0;
+    box-shadow: 0 -8px 40px rgba(0,0,0,0.35); display: flex; flex-direction: column; overflow: hidden;
+  }
+  .s-sheet-bar {
+    display: flex; align-items: center; gap: 9px; padding: 13px 15px;
+    border-bottom: 1px solid var(--app-border); font-size: 12.5px; color: var(--app-text-2);
+  }
+  .s-sheet-bar svg { width: 13px; height: 13px; color: var(--app-success); }
+  .s-sheet-bar .s-url { flex: 1; color: var(--app-text); font-weight: 550; }
+  .s-sheet-bar .s-done { color: var(--app-primary); font-weight: 600; }
+  .s-sheet-body { padding: 30px 24px; flex: 1; }
+  .s-scrim { position: absolute; inset: 0; background: rgba(4,6,10,0.5); }
+  .s-web-brand { display: flex; align-items: center; gap: 9px; margin-bottom: 24px; }
+  .s-web-brand .s-web-mark {
+    width: 28px; height: 28px; border-radius: 9px; background: var(--app-primary);
+    color: #fff; display: grid; place-items: center;
+  }
+  .s-web-brand .s-web-mark svg { width: 16px; height: 16px; }
+  .s-web-brand b { font-size: 14.5px; letter-spacing: -0.01em; }
+
+  /* the "before" screen is intentionally cramped */
+  .s-old-field { margin-bottom: 13px; }
+</style>
+
+<div class="d-wrap">
+
+  <p class="d-eyebrow">Bulwark Mobile · sign-in redesign</p>
+  <h1 class="d-title">Three fields nobody knows the answer&nbsp;to</h1>
+  <p class="d-deck">
+    The current sign-in screen opens with a <strong>Server URL</strong> field. Most people don't know their
+    JMAP endpoint, and the two paths that don't require knowing it — the webmail handoff and the QR code — sit
+    below a divider, greyed out until the URL is filled in anyway. This proposes an entry screen that leads with
+    the easy paths and asks for a server only when we genuinely can't work it out.
+  </p>
+
+  <div class="d-meta">
+    <span>src/screens/LoginScreen.tsx</span>
+    <span>expo · react-native</span>
+    <span>light + dark, both shown</span>
+  </div>
+
+  <section class="d-section">
+    <h2 class="d-h2">What changes</h2>
+    <hr class="d-rule" />
+    <dl class="d-compare">
+      <div class="d-cell">
+        <dt>To reach the inbox</dt>
+        <dd><span class="d-was">3 fields typed</span><span class="d-now">1 field, or none with a code</span></dd>
+      </div>
+      <div class="d-cell">
+        <dt>Server URL</dt>
+        <dd><span class="d-was">Asked first, always</span><span class="d-now">Looked up from the address</span></dd>
+      </div>
+      <div class="d-cell">
+        <dt>Password in the app</dt>
+        <dd><span class="d-was">Default path</span><span class="d-now">Fallback only</span></dd>
+      </div>
+      <div class="d-cell">
+        <dt>QR sign-in</dt>
+        <dd><span class="d-was">Ghost button, disabled</span><span class="d-now">First option offered</span></dd>
+      </div>
+    </dl>
+  </section>
+
+  <section class="d-section">
+    <h2 class="d-h2">Today</h2>
+    <p class="d-lede">
+      Everything at once, in the least helpful order. The webmail handoff is the safer route — it never puts a
+      password into the app — but it's disabled until you've supplied the server, so it can't rescue anyone who's stuck.
+    </p>
+    <hr class="d-rule" />
+
+    <div class="d-strip">
+      <figure>
+        <div class="p">
+          <div class="p-notch"></div>
+          <div class="p-screen">
+            <div class="p-pad is-centered">
+              <div class="s-brand">
+                <div class="s-logo"><svg><use href="#i-shield" /></svg></div>
+                <h1>Bulwark Mail</h1>
+                <p>Secure. Private. Yours.</p>
+              </div>
+
+              <div class="s-old-field">
+                <div class="s-label">Server URL</div>
+                <div class="s-input"><span class="s-ph">https://mail.example.com</span></div>
+              </div>
+              <div class="s-old-field">
+                <div class="s-label">Email or Username</div>
+                <div class="s-input"><span class="s-ph">you@example.com</span></div>
+              </div>
+              <div class="s-old-field">
+                <div class="s-label">Password</div>
+                <div class="s-input">
+                  <span class="s-ph" style="flex:1">Enter your password</span>
+                  <svg><use href="#i-eye" /></svg>
+                </div>
+              </div>
+
+              <div class="s-btn is-off" style="margin-top:12px">Sign In</div>
+
+              <div class="s-divider"><span>or continue with</span></div>
+              <div class="s-stack">
+                <div class="s-btn is-quiet" style="margin-top:0;opacity:0.45">Sign in via webmail</div>
+                <div class="s-link is-muted" style="margin-top:2px;opacity:0.45">Scan QR code</div>
+              </div>
+            </div>
+            <div class="s-foot">Bulwark Mobile v1.4.0<br /><span style="color:var(--app-primary)">Privacy Policy</span></div>
+          </div>
+        </div>
+        <figcaption>
+          <span class="d-step is-alt">Current build</span>
+          <span class="d-cap-title">One screen, six controls</span>
+          <p class="d-cap-body">
+            The two disabled controls at the bottom are the ones that would have helped. Nothing tells you where
+            to find a server URL, and nothing happens if you don't have one.
+          </p>
+        </figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="d-section">
+    <h2 class="d-h2">Proposed flow</h2>
+    <p class="d-lede">
+      One question per screen, cheapest question first. The screens below are the happy path, left to right.
+    </p>
+    <hr class="d-rule" />
+
+    <div class="d-strip">
+
+      <!-- 1 · welcome -->
+      <figure>
+        <div class="p">
+          <div class="p-notch"></div>
+          <div class="p-screen">
+            <div class="p-pad is-centered">
+              <div class="s-brand">
+                <div class="s-logo"><svg><use href="#i-shield" /></svg></div>
+                <h1>Bulwark Mail</h1>
+                <p>Secure. Private. Yours.</p>
+              </div>
+
+              <div class="s-stack">
+                <div class="s-tile is-primary">
+                  <svg class="s-tile-ico"><use href="#i-qr" /></svg>
+                  <span class="s-tile-txt">
+                    <span class="s-tile-t">Scan a sign-in code</span>
+                    <span class="s-tile-d">Already signed in on the web? Fastest way in.</span>
+                  </span>
+                  <svg class="s-tile-chev"><use href="#i-chev" /></svg>
+                </div>
+                <div class="s-tile">
+                  <svg class="s-tile-ico"><use href="#i-mail" /></svg>
+                  <span class="s-tile-txt">
+                    <span class="s-tile-t">Use my email address</span>
+                    <span class="s-tile-d">We'll find your mail server</span>
+                  </span>
+                  <svg class="s-tile-chev"><use href="#i-chev" /></svg>
+                </div>
+              </div>
+
+              <div class="s-link is-muted">Enter server details manually</div>
+            </div>
+            <div class="s-foot">Bulwark Mobile v1.4.0<br /><span style="color:var(--app-primary)">Privacy Policy</span></div>
+          </div>
+        </div>
+        <figcaption>
+          <span class="d-step">Step 1</span>
+          <span class="d-cap-title">Pick a way in</span>
+          <p class="d-cap-body">
+            Two live options instead of six mixed ones. Each tile says what it costs you before you tap it.
+            Manual setup stays reachable in one tap — it just isn't the greeting.
+          </p>
+        </figcaption>
+      </figure>
+
+      <!-- 2 · email -->
+      <figure>
+        <div class="p">
+          <div class="p-notch"></div>
+          <div class="p-screen">
+            <div class="p-pad">
+              <svg class="s-back"><use href="#i-back" /></svg>
+              <h2 class="s-h">What's your email address?</h2>
+              <p class="s-sub">That's usually all we need — we'll look up the mail server for you.</p>
+
+              <div class="s-field">
+                <div class="s-input is-focus">
+                  <svg><use href="#i-mail" /></svg>
+                  <span>ada@example.com</span><span class="s-caret"></span>
+                </div>
+                <p class="s-hint">Works with Bulwark, Stalwart, and any JMAP mail server.</p>
+              </div>
+
+              <div class="s-btn">Continue</div>
+              <div style="flex:1"></div>
+              <div class="s-link is-muted">I know my server address</div>
+            </div>
+          </div>
+        </div>
+        <figcaption>
+          <span class="d-step">Step 2</span>
+          <span class="d-cap-title">One field, keyboard already up</span>
+          <p class="d-cap-body">
+            Autofocus with the email keyboard, autocorrect off. The button stays enabled and validates on tap,
+            so nobody is left staring at a dead grey button wondering which field is wrong.
+          </p>
+        </figcaption>
+      </figure>
+
+      <!-- 3 · found server -->
+      <figure>
+        <div class="p">
+          <div class="p-notch"></div>
+          <div class="p-screen">
+            <div class="p-pad">
+              <svg class="s-back"><use href="#i-back" /></svg>
+              <h2 class="s-h">Found your mail server</h2>
+              <p class="s-sub">Next you'll sign in on your provider's own page.</p>
+
+              <div class="s-card">
+                <span class="s-card-ico"><svg><use href="#i-globe" /></svg></span>
+                <span>
+                  <span class="s-card-t">mail.example.com</span>
+                  <span class="s-card-d"><i class="s-dot"></i> JMAP · secure connection</span>
+                </span>
+              </div>
+
+              <div class="s-note">
+                <svg><use href="#i-lock" /></svg>
+                <span>Your password is typed on your provider's page, never into this app. Bulwark stores a token it can revoke.</span>
+              </div>
+
+              <div class="s-btn">Continue</div>
+              <div class="s-link">Use a different server</div>
+            </div>
+          </div>
+        </div>
+        <figcaption>
+          <span class="d-step">Step 3</span>
+          <span class="d-cap-title">Confirm before the browser opens</span>
+          <p class="d-cap-body">
+            A browser jump with no warning feels like a bug. Naming the server first — and saying why the
+            password isn't asked for here — turns the detour into a security feature.
+          </p>
+        </figcaption>
+      </figure>
+
+      <!-- 4 · handoff -->
+      <figure>
+        <div class="p">
+          <div class="p-notch"></div>
+          <div class="p-screen">
+            <div class="p-pad is-centered" style="opacity:0.5">
+              <div class="s-brand">
+                <div class="s-logo"><svg><use href="#i-shield" /></svg></div>
+                <h1>Bulwark Mail</h1>
+              </div>
+            </div>
+            <div class="s-scrim"></div>
+            <div class="s-sheet">
+              <div class="s-sheet-bar">
+                <svg><use href="#i-lock" /></svg>
+                <span class="s-url">mail.example.com</span>
+                <span class="s-done">Done</span>
+              </div>
+              <div class="s-sheet-body">
+                <div class="s-web-brand">
+                  <span class="s-web-mark"><svg><use href="#i-shield" /></svg></span>
+                  <b>Sign in to Bulwark</b>
+                </div>
+                <div class="s-label">Email</div>
+                <div class="s-input"><span>ada@example.com</span></div>
+                <div class="s-label" style="margin-top:14px">Password</div>
+                <div class="s-input is-focus">
+                  <span style="flex:1">••••••••••</span><svg><use href="#i-eye" /></svg>
+                </div>
+                <div class="s-btn">Sign in</div>
+                <div class="s-divider"><span>or</span></div>
+                <div class="s-tile" style="padding:11px 13px">
+                  <svg class="s-tile-ico"><use href="#i-key" /></svg>
+                  <span class="s-tile-txt"><span class="s-tile-t">Continue with passkey</span></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <figcaption>
+          <span class="d-step">Step 4</span>
+          <span class="d-cap-title">The provider's page, in a sheet</span>
+          <p class="d-cap-body">
+            This is the existing <code>runWebmailHandoff</code> flow, unchanged. It already supports whatever
+            the server offers — password, OAuth, passkeys, SSO — which the in-app form never will.
+          </p>
+        </figcaption>
+      </figure>
+
+      <!-- 5 · setting up -->
+      <figure>
+        <div class="p">
+          <div class="p-notch"></div>
+          <div class="p-screen">
+            <div class="p-pad is-centered">
+              <div style="text-align:center;margin-bottom:26px">
+                <span class="s-av" style="width:60px;height:60px;font-size:22px;background:var(--app-primary);margin:0 auto 14px">AL</span>
+                <h2 class="s-h" style="font-size:20px">Welcome back, Ada</h2>
+                <p class="s-sub">ada@example.com</p>
+              </div>
+
+              <div>
+                <div class="s-prog">
+                  <span class="s-tick"><svg><use href="#i-check" /></svg></span> Mailboxes
+                </div>
+                <div class="s-prog">
+                  <span class="s-tick"><svg><use href="#i-check" /></svg></span> Recent mail
+                </div>
+                <div class="s-prog is-pending">
+                  <span class="s-spin"></span> Contacts and calendars
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <figcaption>
+          <span class="d-step">Step 5</span>
+          <span class="d-cap-title">Land on progress, not a spinner</span>
+          <p class="d-cap-body">
+            The first sync is the slowest moment in the app. Naming what's arriving makes the wait legible, and
+            the inbox opens as soon as mailboxes land — the rest fills in behind it.
+          </p>
+        </figcaption>
+      </figure>
+
+    </div>
+  </section>
+
+  <section class="d-section">
+    <h2 class="d-h2">When it doesn't go smoothly</h2>
+    <p class="d-lede">
+      Self-hosted servers, typo'd passwords, and second accounts are the normal case for this audience, not the
+      exception. These four screens carry most of the redesign's weight.
+    </p>
+    <hr class="d-rule" />
+
+    <div class="d-strip">
+
+      <!-- scanner -->
+      <figure>
+        <div class="p">
+          <div class="p-notch"></div>
+          <div class="p-screen is-camera">
+            <div class="s-cam"><div class="s-cam-grid"></div></div>
+            <div class="s-cam-top">
+              <svg><use href="#i-x" /></svg>
+              <span style="font-size:12.5px;opacity:0.8">Sign-in code</span>
+              <span style="width:22px"></span>
+            </div>
+            <div class="s-reticle">
+              <i></i><i></i><i></i><i></i>
+              <div class="s-qr">
+                <b></b><b></b><b></b><b style="background:transparent"></b><b></b><b style="background:transparent"></b><b></b><b></b><b></b>
+                <b></b><b style="background:transparent"></b><b></b><b></b><b style="background:transparent"></b><b></b><b></b><b style="background:transparent"></b><b></b>
+                <b></b><b></b><b></b><b style="background:transparent"></b><b></b><b></b><b></b><b></b><b></b>
+                <b style="background:transparent"></b><b></b><b style="background:transparent"></b><b></b><b></b><b style="background:transparent"></b><b></b><b style="background:transparent"></b><b></b>
+                <b></b><b></b><b></b><b></b><b style="background:transparent"></b><b></b><b></b><b></b><b style="background:transparent"></b>
+                <b></b><b style="background:transparent"></b><b></b><b style="background:transparent"></b><b></b><b></b><b style="background:transparent"></b><b></b><b></b>
+                <b></b><b></b><b></b><b></b><b></b><b style="background:transparent"></b><b></b><b></b><b></b>
+                <b></b><b style="background:transparent"></b><b></b><b style="background:transparent"></b><b></b><b></b><b></b><b style="background:transparent"></b><b></b>
+                <b></b><b></b><b></b><b></b><b style="background:transparent"></b><b></b><b></b><b></b><b></b>
+              </div>
+            </div>
+            <div class="s-cam-copy">
+              <p class="s-cam-h">Open Bulwark on your computer</p>
+              <p>Settings → Devices → Add phone shows a code. Point the camera at it.</p>
+              <p class="s-cam-link">Type the code instead</p>
+            </div>
+          </div>
+        </div>
+        <figcaption>
+          <span class="d-step">Path A</span>
+          <span class="d-cap-title">The scanner tells you where the code is</span>
+          <p class="d-cap-body">
+            A scanner with no instructions is a dead end for anyone who hasn't seen the webmail's Devices page.
+            Redeeming a paired code skips the browser entirely — see <code>redeemPairingCode</code>.
+          </p>
+        </figcaption>
+      </figure>
+
+      <!-- discovery failed -->
+      <figure>
+        <div class="p">
+          <div class="p-notch"></div>
+          <div class="p-screen">
+            <div class="p-pad">
+              <svg class="s-back"><use href="#i-back" /></svg>
+              <h2 class="s-h">Where does your mail live?</h2>
+              <p class="s-sub">We couldn't find a server for <b>example.org</b>. If you self-host, the address is the one you use for webmail.</p>
+
+              <div class="s-field">
+                <div class="s-label">Server address</div>
+                <div class="s-input is-focus">
+                  <svg><use href="#i-globe" /></svg>
+                  <span>mail.example.org</span><span class="s-caret"></span>
+                </div>
+                <p class="s-hint">Same address you type in the browser. We'll add <b>https://</b>.</p>
+              </div>
+
+              <div class="s-btn">Continue</div>
+              <div style="flex:1"></div>
+              <div class="s-note">
+                <svg><use href="#i-qr" /></svg>
+                <span>Not sure? Scan a sign-in code from the webmail instead — it carries the address with it.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <figcaption>
+          <span class="d-step is-alt">Path B</span>
+          <span class="d-cap-title">Ask for the server people know</span>
+          <p class="d-cap-body">
+            Not the JMAP session URL — the webmail address they type every day. The scheme is added for them, and
+            a trailing slash or full <code>/jmap</code> path is accepted and trimmed.
+          </p>
+        </figcaption>
+      </figure>
+
+      <!-- password fallback + error -->
+      <figure>
+        <div class="p">
+          <div class="p-notch"></div>
+          <div class="p-screen">
+            <div class="p-pad">
+              <svg class="s-back"><use href="#i-back" /></svg>
+              <h2 class="s-h">Sign in to mail.example.org</h2>
+              <p class="s-sub">This server doesn't support the browser sign-in, so we'll ask here.</p>
+
+              <div class="s-field" style="margin-top:18px">
+                <div class="s-label">Email or username</div>
+                <div class="s-input"><span>ada@example.org</span></div>
+              </div>
+
+              <div class="s-field" style="margin-top:14px">
+                <div class="s-label">Password</div>
+                <div class="s-input is-error">
+                  <span style="flex:1">••••••••</span><svg><use href="#i-eye" /></svg>
+                </div>
+              </div>
+
+              <div class="s-banner">
+                <svg><use href="#i-alert" /></svg>
+                <span><b>That password didn't work.</b> If your account has two-factor sign-in, you'll need an app password from the webmail.</span>
+              </div>
+
+              <div class="s-btn">Sign in</div>
+            </div>
+          </div>
+        </div>
+        <figcaption>
+          <span class="d-step is-alt">Path C</span>
+          <span class="d-cap-title">Errors that name the likely cause</span>
+          <p class="d-cap-body">
+            The store's raw error string is replaced with mapped copy per failure: wrong credentials, unreachable
+            host, bad certificate, 2FA-needs-an-app-password. Each says what to do next.
+          </p>
+        </figcaption>
+      </figure>
+
+      <!-- add account -->
+      <figure>
+        <div class="p">
+          <div class="p-notch"></div>
+          <div class="p-screen">
+            <div class="p-pad">
+              <div style="display:flex;justify-content:flex-end"><svg class="s-back" style="margin-bottom:14px"><use href="#i-x" /></svg></div>
+              <h2 class="s-h">Add another account</h2>
+              <p class="s-sub">You're signed in to these already.</p>
+
+              <div style="margin-top:16px">
+                <div class="s-acct">
+                  <span class="s-av" style="background:#3b82f6">AL</span>
+                  <span><span class="s-acct-t">Ada Lovelace</span><span class="s-acct-d">ada@example.com</span></span>
+                </div>
+                <div class="s-acct">
+                  <span class="s-av" style="background:#a855f7">AL</span>
+                  <span><span class="s-acct-t">Work</span><span class="s-acct-d">a.lovelace@analytical.co</span></span>
+                </div>
+              </div>
+
+              <div class="s-divider"><span>add</span></div>
+
+              <div class="s-stack">
+                <div class="s-tile">
+                  <svg class="s-tile-ico"><use href="#i-plus" /></svg>
+                  <span class="s-tile-txt">
+                    <span class="s-tile-t">Another account on example.com</span>
+                    <span class="s-tile-d">Server already known</span>
+                  </span>
+                  <svg class="s-tile-chev"><use href="#i-chev" /></svg>
+                </div>
+                <div class="s-tile">
+                  <svg class="s-tile-ico"><use href="#i-mail" /></svg>
+                  <span class="s-tile-txt"><span class="s-tile-t">A different provider</span></span>
+                  <svg class="s-tile-chev"><use href="#i-chev" /></svg>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <figcaption>
+          <span class="d-step is-alt">Add mode</span>
+          <span class="d-cap-title">Reuse what we already know</span>
+          <p class="d-cap-body">
+            <code>isAddMode</code> currently shows the same blank three-field form. Most second accounts live on
+            the same server as the first, so offer that first and skip discovery entirely.
+          </p>
+        </figcaption>
+      </figure>
+
+    </div>
+  </section>
+
+  <section class="d-section">
+    <h2 class="d-h2">Notes for the build</h2>
+    <hr class="d-rule" />
+    <ul class="d-notes">
+      <li>
+        <svg><use href="#i-globe" /></svg>
+        <div>
+          <div class="d-note-h">Discovery is three cheap probes, in order</div>
+          <p class="d-note-b">
+            From <code>ada@example.com</code>: try <code>https://example.com/.well-known/jmap</code>, then
+            <code>https://mail.example.com/.well-known/jmap</code>, then the same host the last account used.
+            First 200 wins. Budget the whole thing at two seconds and fall through to Path B on timeout — a
+            slow lookup must never be worse than the manual form.
+          </p>
+        </div>
+      </li>
+      <li>
+        <svg><use href="#i-shield" /></svg>
+        <div>
+          <div class="d-note-h">Nothing new on the wire</div>
+          <p class="d-note-b">
+            Every screen drives an existing store action — <code>loginViaWebmail</code>,
+            <code>loginViaPairing</code>, <code>login</code>. The redesign is routing and copy; the auth
+            surface, the state machine, and <code>parseQrLoginPayload</code> stay as they are.
+          </p>
+        </div>
+      </li>
+      <li>
+        <svg><use href="#i-alert" /></svg>
+        <div>
+          <div class="d-note-h">Back must always work</div>
+          <p class="d-note-b">
+            A multi-step flow earns a hardware-back handler on Android. Every step goes back one, and step 1
+            leaves the flow — never a trapped screen with a filled-in field you can't clear.
+          </p>
+        </div>
+      </li>
+      <li>
+        <svg><use href="#i-key" /></svg>
+        <div>
+          <div class="d-note-h">Let the OS help</div>
+          <p class="d-note-b">
+            <code>autoComplete="email"</code> and <code>textContentType="username"</code> on the address field,
+            <code>"password"</code> on the fallback field, so the platform password manager offers to fill and
+            save. The current screen sets neither.
+          </p>
+        </div>
+      </li>
+    </ul>
+  </section>
+
+  <p class="d-foot">Mockup · repos/react-native/mockups/login.html · static HTML, no interaction wired up</p>
+</div>
