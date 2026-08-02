@@ -1,6 +1,5 @@
 import { Platform } from 'react-native';
 import { Directory, File, Paths } from 'expo-file-system';
-import * as FileSystemLegacy from 'expo-file-system/legacy';
 import * as IntentLauncher from 'expo-intent-launcher';
 import * as Sharing from 'expo-sharing';
 import { jmapClient } from '../api/jmap-client';
@@ -52,7 +51,32 @@ function safeAttachmentName(name: string | undefined, type: string | undefined):
 // expo-sharing only accepts `file://` URLs and rejects `content://` with
 // "Only local file URLs are supported". On Android it then wraps the file
 // itself with its bundled SharingFileProvider before launching the share
-// intent, so we must NOT pre-translate to `file.contentUri`.
+// intent, so every `Sharing.shareAsync` below gets `downloaded.uri` and must
+// NOT be pre-translated to `downloaded.contentUri`. `openWithViewer` is the
+// one exception: it assembles the intent itself, so there it's the reverse —
+// only a content URI is grantable to another app.
+
+// Android-only: hand the file to whichever app owns the type (PDF viewer,
+// gallery, video player, ...) rather than to the share sheet. Returns false
+// when the handoff didn't happen so the caller can fall back to sharing —
+// most often because no installed app handles the MIME type, in which case
+// startActivityAsync rejects with ActivityNotFoundException.
+async function openWithViewer(file: File, mimeType: string): Promise<boolean> {
+  try {
+    await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
+      // Read-only grant, scoped to the receiving app for the life of the
+      // intent. Deliberately no FLAG_ACTIVITY_NEW_TASK: expo-intent-launcher
+      // uses startActivityForResult, and a new task cancels that result.
+      data: file.contentUri,
+      type: mimeType,
+      flags: FLAG_GRANT_READ_URI_PERMISSION,
+    });
+    return true;
+  } catch (e) {
+    console.warn('[attachments] no viewer for', mimeType, '- falling back to share:', e);
+    return false;
+  }
+}
 
 // Routes the download via the client-cert-aware native module when the user
 // has picked a cert, and via expo-file-system's native streaming downloader
@@ -104,20 +128,9 @@ export async function shareAttachment(
   const url = getDownloadUrl(blobId, filename, mimeType, accountId);
   const downloaded = await downloadInto(url, dest, Paths.cache);
 
-  if (Platform.OS === 'android') {
-    try {
-      const contentUri = await FileSystemLegacy.getContentUriAsync(downloaded.uri);
-      await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
-        data: contentUri,
-        type: mimeType,
-        flags: FLAG_GRANT_READ_URI_PERMISSION,
-      });
-      return;
-    } catch {
-      // Fallback to sharing dialog if no viewer handles android.intent.action.VIEW
-    }
+  if (Platform.OS === 'android' && (await openWithViewer(downloaded, mimeType))) {
+    return;
   }
-
   if (!(await Sharing.isAvailableAsync())) {
     throw new Error('Sharing is not available on this device');
   }
@@ -130,8 +143,9 @@ export async function shareAttachment(
 // Save-to-disk variant. iOS doesn't expose a user-visible "Downloads" folder,
 // so on both platforms we land the file in the document directory and hand it
 // to the share sheet — which on iOS surfaces "Save to Files" and on Android
-// surfaces the system save dialog. The 'preview' counterpart (shareAttachment)
-// uses cache + share, which on most viewers opens directly without prompting.
+// surfaces the system save dialog. Unlike the 'preview' counterpart
+// (shareAttachment), this one keeps the share sheet on Android as well: "save
+// a copy" is a share-sheet destination, not something a viewer app handles.
 export async function downloadAttachment(
   blobId: string,
   name: string | undefined,
