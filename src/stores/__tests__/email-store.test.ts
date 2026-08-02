@@ -5,6 +5,7 @@ vi.mock('../../api/email', () => ({
   // New helpers used by the incremental-sync path. Default behavior: behave
   // like a first-ever load — no prior state, full re-query expected.
   getMailboxesWithState: vi.fn(async () => ({ list: [], state: 'mb-state-0' })),
+  getSharedMailboxes: vi.fn(async () => []),
   getMailboxesByIds: vi.fn(async () => ({ list: [], state: 'mb-state-0' })),
   getMailboxChanges: vi.fn(async () => null),
   queryEmails: vi.fn(),
@@ -24,6 +25,8 @@ vi.mock('../../api/email', () => ({
   deleteEmail: vi.fn(),
   deleteEmails: vi.fn(),
   searchEmails: vi.fn(),
+  unprefixMailboxId: (id: string, accountId?: string) =>
+    (accountId && id.startsWith(`${accountId}:`) ? id.slice(accountId.length + 1) : id),
 }));
 
 // The mutations now route through the offline outbox. In tests we want the
@@ -31,11 +34,11 @@ vi.mock('../../api/email', () => ({
 // op's primitive) immediately so the existing api-call assertions still hold,
 // without pulling in network-store / NetInfo.
 vi.mock('../outbox-store', async () => {
-  const api = await import('../../api/email') as Record<string, (...args: unknown[]) => Promise<unknown>>;
-  const runOp = async (op: { kind: string; emailId: string; keywords?: unknown; mailboxIds?: unknown }) => {
-    if (op.kind === 'keywords') return api.setEmailKeywords(op.emailId, op.keywords);
-    if (op.kind === 'mailboxes') return api.setEmailMailboxes(op.emailId, op.mailboxIds);
-    if (op.kind === 'destroy') return api.destroyEmails([op.emailId]);
+  const api = await import('../../api/email') as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+  const runOp = async (op: { kind: string; emailId: string; accountId?: string; keywords?: unknown; mailboxIds?: unknown }) => {
+    if (op.kind === 'keywords') return api.setEmailKeywords(op.emailId, op.keywords, op.accountId);
+    if (op.kind === 'mailboxes') return api.setEmailMailboxes(op.emailId, op.mailboxIds, op.accountId);
+    if (op.kind === 'destroy') return api.destroyEmails([op.emailId], op.accountId);
   };
   const applyOrQueueBatch = async (ops: any[], onlineRun?: () => Promise<void>) => {
     if (onlineRun) await onlineRun();
@@ -100,6 +103,8 @@ vi.mock('../../api/jmap-client', () => ({
     currentSession: { apiUrl: 'https://mail.example.com/jmap/' },
     // refreshEmails / loadMoreEmails chunk by this value when fetching ids.
     getMaxObjectsInGet: () => 500,
+    getMaxCallsInRequest: () => 16,
+    getSharedMailAccounts: () => [{ id: 'grp-1', name: 'Support' }],
   },
 }));
 
@@ -110,6 +115,7 @@ import * as emailApi from '../../api/email';
 import { useEmailStore } from '../email-store';
 
 const mockGetMailboxesWithState = emailApi.getMailboxesWithState as ReturnType<typeof vi.fn>;
+const mockGetSharedMailboxes = emailApi.getSharedMailboxes as ReturnType<typeof vi.fn>;
 const mockQueryEmails = emailApi.queryEmails as ReturnType<typeof vi.fn>;
 const mockGetEmailQueryChanges = emailApi.getEmailQueryChanges as ReturnType<typeof vi.fn>;
 const mockGetEmails = emailApi.getEmails as ReturnType<typeof vi.fn>;
@@ -224,7 +230,7 @@ describe('email-store', () => {
 
       await useEmailStore.getState().markRead('e1');
 
-      expect(mockSetKeywords).toHaveBeenCalledWith('e1', { $seen: true });
+      expect(mockSetKeywords).toHaveBeenCalledWith('e1', { $seen: true }, undefined);
       expect(useEmailStore.getState().emails[0].keywords.$seen).toBe(true);
     });
   });
@@ -238,7 +244,7 @@ describe('email-store', () => {
 
       await useEmailStore.getState().markUnread('e1');
 
-      expect(mockSetKeywords).toHaveBeenCalledWith('e1', { $flagged: true });
+      expect(mockSetKeywords).toHaveBeenCalledWith('e1', { $flagged: true }, undefined);
       expect(useEmailStore.getState().emails[0].keywords.$seen).toBeUndefined();
     });
   });
@@ -276,7 +282,7 @@ describe('email-store', () => {
 
       await useEmailStore.getState().moveToMailbox('e1', 'inbox', 'archive');
 
-      expect(mockMoveEmail).toHaveBeenCalledWith('e1', 'inbox', 'archive');
+      expect(mockMoveEmail).toHaveBeenCalledWith('e1', 'inbox', 'archive', undefined);
       expect(useEmailStore.getState().emails).toHaveLength(1);
       expect(useEmailStore.getState().emails[0].id).toBe('e2');
     });
@@ -465,6 +471,93 @@ describe('email-store', () => {
       const result = await useEmailStore.getState().getEmailDetail('e1');
 
       expect(result).toEqual(fullEmail);
+    });
+  });
+  // ── Shared (Stalwart group account) mailboxes ────────────────────────────
+  describe('shared mailboxes', () => {
+    const RIGHTS = {
+      mayReadItems: true, mayAddItems: true, mayRemoveItems: true,
+      maySetSeen: true, maySetKeywords: true, mayCreateChild: true,
+      mayRename: true, mayDelete: true, maySubmit: true,
+    };
+    const ownInbox = {
+      id: 'mb-1', name: 'Inbox', role: 'inbox', totalEmails: 0, unreadEmails: 0,
+      totalThreads: 0, unreadThreads: 0, myRights: RIGHTS,
+      accountId: 'acc-1', isShared: false,
+    } as any;
+    const sharedInbox = {
+      id: 'grp-1:s-inbox', originalId: 's-inbox', name: 'Inbox', role: 'inbox',
+      totalEmails: 0, unreadEmails: 0, totalThreads: 0, unreadThreads: 0,
+      myRights: RIGHTS, accountId: 'grp-1', accountName: 'Support', isShared: true,
+    } as any;
+    const sharedTrash = {
+      ...sharedInbox, id: 'grp-1:s-trash', originalId: 's-trash', name: 'Trash', role: 'trash',
+    } as any;
+
+    it('merges shared folders in alongside the own ones', async () => {
+      mockGetMailboxesWithState.mockResolvedValue({ list: [ownInbox], state: 'mb-1' });
+      mockGetSharedMailboxes.mockResolvedValue([sharedInbox]);
+
+      await useEmailStore.getState().fetchMailboxes();
+
+      expect(useEmailStore.getState().mailboxes).toEqual([ownInbox, sharedInbox]);
+    });
+
+    it('keeps the own folders when a shared account cannot be reached', async () => {
+      mockGetMailboxesWithState.mockResolvedValue({ list: [ownInbox], state: 'mb-1' });
+      mockGetSharedMailboxes.mockRejectedValue(new Error('Session expired'));
+
+      await useEmailStore.getState().fetchMailboxes();
+
+      const state = useEmailStore.getState();
+      expect(state.mailboxes).toEqual([ownInbox]);
+      expect(state.error).toBeNull();
+    });
+
+    it('queries a shared folder against its owning account by raw id', async () => {
+      useEmailStore.setState({ mailboxes: [ownInbox, sharedInbox] });
+      mockQueryEmails.mockResolvedValue({ ids: ['e1'], total: 1, queryState: 'q-1' });
+      mockGetEmailsWithState.mockResolvedValue({
+        list: [{ id: 'e1', subject: 'Hi' }], state: 'em-1',
+      });
+
+      await useEmailStore.getState().selectMailbox('grp-1:s-inbox');
+
+      expect(mockQueryEmails).toHaveBeenCalledWith('s-inbox', expect.objectContaining({
+        accountId: 'grp-1',
+        filter: { inMailbox: 's-inbox' },
+      }));
+      expect(mockGetEmailsWithState).toHaveBeenCalledWith(['e1'], 'grp-1');
+      // Email state tokens are per-account, so the shared account gets its own.
+      expect(useEmailStore.getState().emailStates).toEqual({ 'grp-1': 'em-1' });
+    });
+
+    it('deletes from a shared folder against the owning account', async () => {
+      useEmailStore.setState({
+        mailboxes: [ownInbox, sharedInbox, sharedTrash],
+        currentMailboxId: 'grp-1:s-inbox',
+        emails: [{ id: 'e1', keywords: {}, mailboxIds: { 's-inbox': true } } as any],
+      });
+
+      await useEmailStore.getState().deleteEmail('e1', 'grp-1:s-trash', 'grp-1:s-inbox');
+
+      expect(mockDeleteEmail).toHaveBeenCalledWith('e1', 's-trash', 's-inbox', 'grp-1');
+      expect(useEmailStore.getState().emails).toHaveLength(0);
+    });
+
+    it('refuses to move a message between accounts', async () => {
+      useEmailStore.setState({
+        mailboxes: [ownInbox, sharedInbox],
+        currentMailboxId: 'grp-1:s-inbox',
+        emails: [{ id: 'e1', keywords: {}, mailboxIds: { 's-inbox': true } } as any],
+      });
+
+      await useEmailStore.getState().moveToMailbox('e1', 'grp-1:s-inbox', 'mb-1');
+
+      expect(mockMoveEmail).not.toHaveBeenCalled();
+      const state = useEmailStore.getState();
+      expect(state.error).toMatch(/same account/);
+      expect(state.emails).toHaveLength(1);
     });
   });
 });

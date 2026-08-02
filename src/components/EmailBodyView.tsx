@@ -27,6 +27,8 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 interface EmailBodyViewProps {
   email: Email;
   senderEmail?: string;
+  /** Owning account when the message lives in a shared/group mailbox. */
+  jmapAccountId?: string;
   // The body is a native WebView, which on Android swallows horizontal touches
   // before the surrounding pager can see them. We detect a clear horizontal
   // swipe inside the page and report it here so the pager can change messages.
@@ -457,7 +459,9 @@ const PINCH_ZOOM = `
 })();
 `;
 
-export default function EmailBodyView({ email, senderEmail, onSwipe, onZoomChange }: EmailBodyViewProps) {
+export default function EmailBodyView({
+  email, senderEmail, jmapAccountId, onSwipe, onZoomChange,
+}: EmailBodyViewProps) {
   const c = useColors();
   const styles = React.useMemo(() => makeStyles(c), [c]);
   const externalContentPolicy = useSettingsStore((s) => s.externalContentPolicy);
@@ -561,7 +565,9 @@ export default function EmailBodyView({ email, senderEmail, onSwipe, onZoomChang
       await Promise.all(
         toFetch.map(async ({ ref, att }) => {
           try {
-            const buf = await jmapClient.fetchBlobArrayBuffer(att.blobId, att.name, att.type);
+            const buf = await jmapClient.fetchBlobArrayBuffer(
+              att.blobId, att.name, att.type, jmapAccountId,
+            );
             if (cancelled) return;
             const b64 = arrayBufferToBase64(buf);
             next[ref] = `data:${att.type || 'application/octet-stream'};base64,${b64}`;
@@ -575,7 +581,7 @@ export default function EmailBodyView({ email, senderEmail, onSwipe, onZoomChang
       }
     })();
     return () => { cancelled = true; };
-  }, [rawHtml, email.attachments]);
+  }, [rawHtml, email.attachments, jmapAccountId]);
 
   const source = React.useMemo(() => {
     if (rawHtml) {

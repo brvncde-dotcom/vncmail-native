@@ -98,7 +98,9 @@ export function MoveSheet({
           {visibleNodes.map((node) => {
             const Icon = moveTargetIcon(node.role, node.name);
             const isCurrent = node.id === currentMailboxId;
-            const canTarget = node.myRights?.mayAddItems !== false && !isCurrent;
+            // A shared account's header is a grouping row, not a folder.
+            const canTarget =
+              !node.isAccountNode && node.myRights?.mayAddItems !== false && !isCurrent;
             return (
               <Pressable
                 key={node.id}

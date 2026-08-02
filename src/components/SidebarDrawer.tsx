@@ -8,7 +8,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   Inbox, Send, File as FileIcon, Trash2, Ban, Archive, Star,
   Folder, FolderOpen, ChevronDown, ChevronRight, X, Settings, LogOut, Check, Plus,
-  Clock, Layers,
+  Clock, Layers, Users,
 } from 'lucide-react-native';
 import type { LucideIcon } from 'lucide-react-native';
 import { spacing, radius, typography, type ThemePalette } from '../theme/tokens';
@@ -83,6 +83,8 @@ interface SidebarRowProps {
   label: string;
   depth: number;
   isSelected: boolean;
+  /** Header for a shared/group account: styled as a section, never selected. */
+  isAccountHeader?: boolean;
   unread: number;
   total: number;
   hasChildren: boolean;
@@ -92,7 +94,7 @@ interface SidebarRowProps {
 }
 
 function SidebarRow({
-  icon, label, depth, isSelected, unread, total,
+  icon, label, depth, isSelected, isAccountHeader, unread, total,
   hasChildren, isExpanded, onPress, onToggleExpand,
 }: SidebarRowProps) {
   const c = useColors();
@@ -126,7 +128,11 @@ function SidebarRow({
       </View>
       <View style={styles.rowIcon}>{icon}</View>
       <Text
-        style={[styles.rowLabel, isSelected && styles.rowLabelSelected]}
+        style={[
+          styles.rowLabel,
+          isSelected && styles.rowLabelSelected,
+          isAccountHeader && styles.rowLabelAccount,
+        ]}
         numberOfLines={1}
       >
         {label}
@@ -467,20 +473,34 @@ export default function SidebarDrawer({ visible, onClose }: SidebarDrawerProps) 
                 visibleNodes.map((node) => {
                   const hasChildren = node.children.length > 0;
                   const isExpanded = expandedFolders.has(node.id);
-                  const Icon = iconFor(node.role, node.name, hasChildren, isExpanded);
-                  const isSelected = node.id === currentMailboxId;
+                  // A shared/group account's header has no mailbox behind it —
+                  // tapping it only opens or closes that account's folders.
+                  const Icon = node.isAccountNode
+                    ? Users
+                    : iconFor(node.role, node.name, hasChildren, isExpanded);
+                  const isSelected = !node.isAccountNode && node.id === currentMailboxId;
                   return (
                     <SidebarRow
                       key={node.id}
-                      icon={<Icon size={16} color={iconColor(c, node.role, isSelected)} />}
+                      icon={
+                        <Icon
+                          size={16}
+                          color={node.isAccountNode ? c.textMuted : iconColor(c, node.role, isSelected)}
+                        />
+                      }
                       label={node.name}
                       depth={node.depth}
                       isSelected={isSelected}
+                      isAccountHeader={node.isAccountNode}
                       unread={node.unreadEmails}
                       total={node.totalEmails}
                       hasChildren={hasChildren}
                       isExpanded={isExpanded}
-                      onPress={() => handleSelect(node.id)}
+                      onPress={
+                        node.isAccountNode
+                          ? () => toggleExpand(node.id)
+                          : () => handleSelect(node.id)
+                      }
                       onToggleExpand={() => toggleExpand(node.id)}
                     />
                   );
@@ -740,6 +760,13 @@ function makeStyles(c: ThemePalette) {
   rowLabelSelected: {
     ...typography.bodySemibold,
     color: c.text,
+  },
+  rowLabelAccount: {
+    ...typography.caption,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    color: c.textSecondary,
   },
   counts: {
     flexDirection: 'row',

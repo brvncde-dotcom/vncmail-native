@@ -99,7 +99,15 @@ export interface MailboxRights {
 }
 
 export interface Mailbox {
+  /**
+   * Unique within the app. For the user's own folders this is the raw JMAP id;
+   * for a shared (group) account's folders it's `<accountId>:<rawId>` so ids
+   * from different accounts can't collide. Use `originalId` when talking to
+   * the server. Mirrors the webmail's scheme in [lib/jmap/client.ts].
+   */
   id: string;
+  /** Raw JMAP id — set only on shared folders, where `id` carries a prefix. */
+  originalId?: string;
   name: string;
   parentId?: string | null;
   role?: string | null;
@@ -110,6 +118,12 @@ export interface Mailbox {
   unreadThreads: number;
   myRights: MailboxRights;
   isSubscribed?: boolean;
+  /** JMAP account the folder lives under (primary or a shared/group account). */
+  accountId?: string;
+  /** Display name of the owning account, used as the sidebar group header. */
+  accountName?: string;
+  /** True when the folder belongs to a shared/group account, not the user. */
+  isShared?: boolean;
 }
 
 export interface Thread {

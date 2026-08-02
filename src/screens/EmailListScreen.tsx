@@ -24,7 +24,9 @@ import { useSettingsStore, type SwipeAction } from '../stores/settings-store';
 import { useKeywordsStore } from '../stores/keywords-store';
 import { useLocaleStore } from '../stores/locale-store';
 import { formatListDate } from '../lib/date-format';
-import { findTrashMailbox, findArchiveMailbox, findJunkMailbox } from '../lib/mailbox-tree';
+import {
+  findTrashMailbox, findArchiveMailbox, findJunkMailbox, mailboxesForSiblingOf, ownMailboxes,
+} from '../lib/mailbox-tree';
 import type { Email } from '../api/types';
 function getSenderName(email: Email): string {
   return email.from?.[0]?.name || email.from?.[0]?.email || 'Unknown';
@@ -243,24 +245,31 @@ export default function EmailListScreen({ onEmailPress, onComposePress }: EmailL
     return counts;
   }, [emails, disableThreading]);
 
+  // Role folders must come from the account the open folder belongs to: a
+  // shared (group account) message can only be filed into that account's
+  // Archive/Trash/Junk, never the user's own.
+  const scopedMailboxes = React.useMemo(
+    () => mailboxesForSiblingOf(mailboxes, currentMailboxId),
+    [mailboxes, currentMailboxId],
+  );
   const archiveMailboxId = React.useMemo(
-    () => findArchiveMailbox(mailboxes)?.id ?? null,
-    [mailboxes],
+    () => findArchiveMailbox(scopedMailboxes)?.id ?? null,
+    [scopedMailboxes],
   );
   const trashMailboxId = React.useMemo(
-    () => findTrashMailbox(mailboxes)?.id ?? null,
-    [mailboxes],
+    () => findTrashMailbox(scopedMailboxes)?.id ?? null,
+    [scopedMailboxes],
   );
   const junkMailboxId = React.useMemo(
-    () => findJunkMailbox(mailboxes)?.id ?? null,
-    [mailboxes],
+    () => findJunkMailbox(scopedMailboxes)?.id ?? null,
+    [scopedMailboxes],
   );
 
   // Import .eml / .zip files into the current mailbox (falls back to Inbox).
   const [importing, setImporting] = React.useState(false);
   const handleImport = React.useCallback(async () => {
     const targetMailboxId =
-      currentMailboxId ?? mailboxes.find((m) => m.role === 'inbox')?.id ?? null;
+      currentMailboxId ?? ownMailboxes(mailboxes).find((m) => m.role === 'inbox')?.id ?? null;
     if (!targetMailboxId || importing) return;
     let result: DocumentPicker.DocumentPickerResult;
     try {
@@ -460,7 +469,7 @@ export default function EmailListScreen({ onEmailPress, onComposePress }: EmailL
   };
 
   const handleBulkDelete = async () => {
-    const trash = findTrashMailbox(mailboxes);
+    const trash = findTrashMailbox(scopedMailboxes);
     if (!trash || !currentMailboxId) {
       clearSelection();
       return;
@@ -548,7 +557,9 @@ export default function EmailListScreen({ onEmailPress, onComposePress }: EmailL
 
   React.useEffect(() => {
     if (mailboxes.length > 0 && !currentMailboxId) {
-      const inbox = mailboxes.find((m) => m.role === 'inbox') || mailboxes[0];
+      const own = ownMailboxes(mailboxes);
+      const inbox = own.find((m) => m.role === 'inbox') || own[0];
+      if (!inbox) return;
       void selectMailbox(inbox.id);
     }
   }, [mailboxes, currentMailboxId, selectMailbox]);
@@ -620,7 +631,13 @@ export default function EmailListScreen({ onEmailPress, onComposePress }: EmailL
           <Pressable onPress={() => setDrawerOpen(true)} style={styles.headerButton}>
             <Menu size={20} color={c.textMuted} />
           </Pressable>
-          <Text style={styles.headerTitle} numberOfLines={1}>{currentMailbox?.name ?? 'Inbox'}</Text>
+          <Text style={styles.headerTitle} numberOfLines={1}>
+            {currentMailbox?.isShared && currentMailbox.accountName
+              // Name the owning group account — a bare "Inbox" would look like
+              // the user's own.
+              ? `${currentMailbox.accountName} · ${currentMailbox.name}`
+              : currentMailbox?.name ?? 'Inbox'}
+          </Text>
           <View style={{ flex: 1 }} />
           <Pressable
             onPress={() => { void handleImport(); }}
@@ -1013,7 +1030,7 @@ export default function EmailListScreen({ onEmailPress, onComposePress }: EmailL
       <MoveSheet
         visible={pendingMoveId !== null}
         onClose={() => setPendingMoveId(null)}
-        mailboxes={mailboxes}
+        mailboxes={scopedMailboxes}
         currentMailboxId={currentMailboxId}
         onPick={(toId) => {
           const id = pendingMoveId;
@@ -1027,7 +1044,7 @@ export default function EmailListScreen({ onEmailPress, onComposePress }: EmailL
       <MoveSheet
         visible={batchMoveOpen}
         onClose={() => setBatchMoveOpen(false)}
-        mailboxes={mailboxes}
+        mailboxes={scopedMailboxes}
         currentMailboxId={currentMailboxId}
         onPick={handleBatchMovePick}
       />

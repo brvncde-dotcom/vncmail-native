@@ -18,6 +18,7 @@ import { SettingsSection } from './settings-section';
 import Button from '../Button';
 import { spacing, radius, typography, type ThemePalette } from '../../theme/tokens';
 import { useColors } from '../../theme/colors';
+import { ownMailboxes } from '../../lib/mailbox-tree';
 import { useEmailStore } from '../../stores/email-store';
 import { createMailbox, updateMailbox, deleteMailbox } from '../../api/email';
 import type { Mailbox } from '../../api/types';
@@ -43,7 +44,10 @@ type Editor =
 export function FolderSettings() {
   const c = useColors();
   const styles = React.useMemo(() => makeStyles(c), [c]);
-  const mailboxes = useEmailStore((s) => s.mailboxes);
+  // Folder management (create/rename/delete) targets the user's own account;
+  // shared (group account) folders are read-only here.
+  const allMailboxes = useEmailStore((s) => s.mailboxes);
+  const mailboxes = React.useMemo(() => ownMailboxes(allMailboxes), [allMailboxes]);
   const fetchMailboxes = useEmailStore((s) => s.fetchMailboxes);
 
   const [editor, setEditor] = useState<Editor | null>(null);

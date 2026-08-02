@@ -14,6 +14,7 @@ import {
 } from '../../stores/settings-store';
 import { useEmailStore } from '../../stores/email-store';
 import { archiveEmails, queryEmails, getEmails } from '../../api/email';
+import { ownMailboxes } from '../../lib/mailbox-tree';
 
 function MailLayoutPreview({ value }: { value: MailLayout }) {
   const c = useColors();
@@ -103,7 +104,8 @@ export function ReadingSettings() {
 
   const handleReorganizeArchive = async () => {
     const { mailboxes, fetchMailboxes } = useEmailStore.getState();
-    const archiveMailbox = mailboxes.find(
+    // Reorganising runs against the user's own archive only.
+    const archiveMailbox = ownMailboxes(mailboxes).find(
       (m) => m.role === 'archive' || m.name.toLowerCase() === 'archive',
     );
     if (!archiveMailbox) {
@@ -130,7 +132,7 @@ export function ReadingSettings() {
         if (ids.length === 0) break;
 
         const list = await getEmails(ids);
-        const refreshed = useEmailStore.getState().mailboxes;
+        const refreshed = ownMailboxes(useEmailStore.getState().mailboxes);
         await archiveEmails(
           list.map((e) => ({ id: e.id, receivedAt: e.receivedAt })),
           archiveMailbox.id,

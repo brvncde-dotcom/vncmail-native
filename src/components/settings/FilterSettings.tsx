@@ -12,6 +12,7 @@ import { useSettingsStore } from '../../stores/settings-store';
 import { useFilterStore } from '../../stores/filter-store';
 import { useVacationStore } from '../../stores/vacation-store';
 import { useEmailStore } from '../../stores/email-store';
+import { ownMailboxes } from '../../lib/mailbox-tree';
 import { useLocaleStore } from '../../stores/locale-store';
 import { FilterRuleModal } from '../filters/FilterRuleModal';
 import { SieveEditorSheet } from '../filters/SieveEditorSheet';
@@ -48,7 +49,10 @@ export function FilterSettings() {
   const expandedView = useSettingsStore((s) => s.filtersExpandedView);
   const updateSetting = useSettingsStore((s) => s.updateSetting);
 
-  const mailboxes = useEmailStore((s) => s.mailboxes);
+  // Sieve rules run on the user's own account, so only own folders are
+  // valid "file into" targets.
+  const allMailboxes = useEmailStore((s) => s.mailboxes);
+  const mailboxes = useMemo(() => ownMailboxes(allMailboxes), [allMailboxes]);
   const vacationEnabled = useVacationStore((s) => s.isEnabled);
 
   const {

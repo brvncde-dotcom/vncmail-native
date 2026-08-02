@@ -34,10 +34,13 @@ function storageKey(accountId: string): string {
   return `${KEY_PREFIX}${accountId}`;
 }
 
+// `accountId` is the JMAP account the message lives under. Absent for the
+// user's own mail (the client's primary account); set when the message belongs
+// to a shared/group account, so replay after a reconnect still targets it.
 export type OutboxOp =
-  | { kind: 'keywords'; emailId: string; keywords: Record<string, boolean> }
-  | { kind: 'mailboxes'; emailId: string; mailboxIds: Record<string, boolean> }
-  | { kind: 'destroy'; emailId: string };
+  | { kind: 'keywords'; emailId: string; accountId?: string; keywords: Record<string, boolean> }
+  | { kind: 'mailboxes'; emailId: string; accountId?: string; mailboxIds: Record<string, boolean> }
+  | { kind: 'destroy'; emailId: string; accountId?: string };
 
 export interface OutboxEntry {
   id: string;
@@ -85,11 +88,11 @@ async function load(accountId: string): Promise<OutboxEntry[]> {
 async function runOp(op: OutboxOp): Promise<void> {
   switch (op.kind) {
     case 'keywords':
-      return setEmailKeywords(op.emailId, op.keywords);
+      return setEmailKeywords(op.emailId, op.keywords, op.accountId);
     case 'mailboxes':
-      return setEmailMailboxes(op.emailId, op.mailboxIds);
+      return setEmailMailboxes(op.emailId, op.mailboxIds, op.accountId);
     case 'destroy':
-      return destroyEmails([op.emailId]);
+      return destroyEmails([op.emailId], op.accountId);
   }
 }
 
@@ -136,20 +139,23 @@ export const useOutboxStore = create<OutboxState>((set, get) => ({
       return;
     }
     let entries = [...get().entries];
-    const { emailId } = op;
+    // Message identity is (account, id): JMAP ids are only unique within an
+    // account, and the queue can hold ops for shared accounts alongside own.
+    const sameMessage = (other: OutboxOp) =>
+      other.emailId === op.emailId && other.accountId === op.accountId;
 
     if (op.kind === 'destroy') {
       // Destroy is terminal — drop any pending edits for this message and
       // append the destroy so it runs last.
-      entries = entries.filter((e) => e.op.emailId !== emailId);
+      entries = entries.filter((e) => !sameMessage(e.op));
       entries.push({ id: generateUUID(), op, createdAt: Date.now(), attempts: 0 });
     } else {
       // A queued destroy wins; further edits to a doomed message are pointless.
-      if (entries.some((e) => e.op.emailId === emailId && e.op.kind === 'destroy')) return;
+      if (entries.some((e) => sameMessage(e.op) && e.op.kind === 'destroy')) return;
       // Coalesce: replace any pending op of the same kind for this message
       // (full-state replace makes the latest one authoritative). Keep its
       // position so creation order is preserved for replay.
-      const idx = entries.findIndex((e) => e.op.emailId === emailId && e.op.kind === op.kind);
+      const idx = entries.findIndex((e) => sameMessage(e.op) && e.op.kind === op.kind);
       if (idx >= 0) {
         entries[idx] = { ...entries[idx], op, attempts: 0, lastError: undefined };
       } else {

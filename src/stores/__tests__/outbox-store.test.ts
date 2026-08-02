@@ -79,7 +79,7 @@ describe('applyOrQueue', () => {
   it('runs immediately when online with an empty queue', async () => {
     const result = await applyOrQueue({ kind: 'keywords', emailId: 'e1', keywords: { $seen: true } });
     expect(result.queued).toBe(false);
-    expect(setEmailKeywords).toHaveBeenCalledWith('e1', { $seen: true });
+    expect(setEmailKeywords).toHaveBeenCalledWith('e1', { $seen: true }, undefined);
     expect(useOutboxStore.getState().entries).toHaveLength(0);
   });
 
@@ -137,9 +137,9 @@ describe('flush', () => {
     useNetworkStore.setState({ online: true });
     await useOutboxStore.getState().flush();
 
-    expect(setEmailKeywords).toHaveBeenCalledWith('e1', { $seen: true });
-    expect(setEmailMailboxes).toHaveBeenCalledWith('e2', { trash: true });
-    expect(destroyEmails).toHaveBeenCalledWith(['e3']);
+    expect(setEmailKeywords).toHaveBeenCalledWith('e1', { $seen: true }, undefined);
+    expect(setEmailMailboxes).toHaveBeenCalledWith('e2', { trash: true }, undefined);
+    expect(destroyEmails).toHaveBeenCalledWith(['e3'], undefined);
     expect(useOutboxStore.getState().entries).toHaveLength(0);
   });
 

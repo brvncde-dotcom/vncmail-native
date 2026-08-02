@@ -23,6 +23,7 @@ import RichTextEditor, {
   type RichTextSelectionState,
 } from '../components/RichTextEditor';
 import { useEmailStore } from '../stores/email-store';
+import { ownMailboxes } from '../lib/mailbox-tree';
 import { useContactsStore } from '../stores/contacts-store';
 import { useLocaleStore } from '../stores/locale-store';
 import { useSettingsStore } from '../stores/settings-store';
@@ -263,8 +264,10 @@ export default function ComposeScreen({ route, navigation }: Props) {
   const mode = route.params?.mode ?? 'compose';
   const prefillTo = route.params?.prefillTo;
   const mailboxes = useEmailStore((s) => s.mailboxes);
+  // Always the user's own Sent — composing on behalf of a shared account
+  // isn't supported, so a group account's Sent must never be picked up here.
   const sentMailbox = React.useMemo(
-    () => mailboxes.find((m) => m.role === 'sent'),
+    () => ownMailboxes(mailboxes).find((m) => m.role === 'sent'),
     [mailboxes],
   );
 

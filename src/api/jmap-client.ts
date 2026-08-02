@@ -459,6 +459,43 @@ export class JMAPClient {
     return core?.maxObjectsInGet || 500;
   }
 
+  getMaxCallsInRequest(): number {
+    const core = this.session?.capabilities?.[CAPABILITIES.CORE] as
+      | { maxCallsInRequest?: number }
+      | undefined;
+    return core?.maxCallsInRequest || 16;
+  }
+
+  // ── Shared / group accounts ───────────────────────────
+  // A JMAP session lists every account the credentials can reach: the user's
+  // own, plus any shared/group accounts (Stalwart "group accounts") they are a
+  // member of. Non-personal accounts are the shared mailboxes.
+
+  /**
+   * Mail-capable accounts other than the primary one. Stalwart doesn't always
+   * populate `accountCapabilities` on shared accounts, so an account counts as
+   * mail-capable when it advertises the mail capability OR is non-personal —
+   * the same rule the webmail's getSharedAccounts() applies.
+   */
+  getSharedMailAccounts(): { id: string; name: string }[] {
+    if (!this.session || !this._accountId) return [];
+    const primaryId = this._accountId;
+    const out: { id: string; name: string }[] = [];
+    for (const [id, info] of Object.entries(this.session.accounts ?? {})) {
+      if (id === primaryId) continue;
+      const advertisesMail = info.accountCapabilities
+        ? CAPABILITIES.MAIL in info.accountCapabilities
+        : false;
+      if (!advertisesMail && info.isPersonal) continue;
+      out.push({ id, name: info.name || id });
+    }
+    return out;
+  }
+
+  getAccountName(accountId: string): string | undefined {
+    return this.session?.accounts?.[accountId]?.name;
+  }
+
   // ── Scheduled send (FUTURERELEASE) ────────────────────
   // The JMAP submission capability advertises `maxDelayedSend` (max hold in
   // seconds) and a `submissionExtensions` map; FUTURERELEASE support is what
@@ -515,19 +552,26 @@ export class JMAPClient {
   // ── Blob Download ─────────────────────────────────────
 
   // Expand the RFC 6570 level-1 template the JMAP server advertises.
-  getBlobDownloadUrl(blobId: string, name?: string, type?: string): string {
+  // `accountId` targets a shared/group account, whose blobs aren't reachable
+  // through the user's own account id.
+  getBlobDownloadUrl(blobId: string, name?: string, type?: string, accountId?: string): string {
     if (!this.session?.downloadUrl) {
       throw new Error('Download URL not available - not connected');
     }
     return this.session.downloadUrl
-      .replace('{accountId}', encodeURIComponent(this.accountId))
+      .replace('{accountId}', encodeURIComponent(accountId ?? this.accountId))
       .replace('{blobId}', encodeURIComponent(blobId))
       .replace('{name}', encodeURIComponent(name || 'download'))
       .replace('{type}', encodeURIComponent(type || 'application/octet-stream'));
   }
 
-  async fetchBlobArrayBuffer(blobId: string, name?: string, type?: string): Promise<ArrayBuffer> {
-    const url = this.getBlobDownloadUrl(blobId, name, type);
+  async fetchBlobArrayBuffer(
+    blobId: string,
+    name?: string,
+    type?: string,
+    accountId?: string,
+  ): Promise<ArrayBuffer> {
+    const url = this.getBlobDownloadUrl(blobId, name, type, accountId);
     await this.ensureFreshToken();
     const doFetch = () => secureFetch(url, { headers: { Authorization: this.authHeader } });
     let response = await doFetch();

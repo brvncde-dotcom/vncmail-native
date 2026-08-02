@@ -30,7 +30,7 @@ import { shareEmailEml, shareAttachment, downloadAttachment } from '../lib/email
 import { useKeywordsStore, keywordToken, type KeywordDef } from '../stores/keywords-store';
 import { useSheetDrag } from '../lib/use-sheet-drag';
 import { useLocaleStore } from '../stores/locale-store';
-import { findTrashMailbox } from '../lib/mailbox-tree';
+import { findTrashMailbox, mailboxesForSiblingOf } from '../lib/mailbox-tree';
 import type { Email, Mailbox } from '../api/types';
 import type { RootStackParamList } from '../navigation/types';
 
@@ -84,6 +84,17 @@ export default function EmailThreadScreen({ route, navigation }: Props) {
   const currentMailboxId = useEmailStore((s) => s.currentMailboxId);
   const emails = useEmailStore((s) => s.emails);
 
+  // The JMAP account the open message belongs to: the route param when the
+  // unified inbox opened a group message, otherwise the account behind the
+  // folder it was opened from. Undefined means the user's own mail.
+  const ownerAccountId = React.useMemo(() => {
+    if (jmapAccountId) return jmapAccountId;
+    const current = currentMailboxId
+      ? mailboxes.find((m) => m.id === currentMailboxId)
+      : undefined;
+    return current?.isShared ? current.accountId : undefined;
+  }, [jmapAccountId, mailboxes, currentMailboxId]);
+
   const currentIndex = emails.findIndex((e) => e.id === activeEmailId);
   const prevEmail = currentIndex > 0 ? emails[currentIndex - 1] : null;
   const nextEmail = currentIndex >= 0 && currentIndex < emails.length - 1 ? emails[currentIndex + 1] : null;
@@ -128,13 +139,13 @@ export default function EmailThreadScreen({ route, navigation }: Props) {
   const ensureDetail = React.useCallback((id: string): Promise<Email | null> => {
     const pending = inFlight.get(id);
     if (pending) return pending;
-    const p = getEmailDetail(id, jmapAccountId)
+    const p = getEmailDetail(id, ownerAccountId)
       .then((fetched) => { detailCache.set(id, fetched); bumpCache(); return fetched; })
       .catch(() => detailCache.get(id) ?? null)
       .finally(() => { inFlight.delete(id); });
     inFlight.set(id, p);
     return p;
-  }, [getEmailDetail, jmapAccountId, detailCache, bumpCache, inFlight]);
+  }, [getEmailDetail, ownerAccountId, detailCache, bumpCache, inFlight]);
 
   // Slide to a page by index and reflect it in the toolbar immediately; a swipe
   // that settles on the same page confirms the same id via onMomentumEnd.
@@ -190,9 +201,9 @@ export default function EmailThreadScreen({ route, navigation }: Props) {
       setDownloadingBlobId(blobId);
       try {
         if (mailAttachmentAction === 'download') {
-          await downloadAttachment(blobId, name, type, target);
+          await downloadAttachment(blobId, name, type, target, ownerAccountId);
         } else {
-          await shareAttachment(blobId, name, type, target);
+          await shareAttachment(blobId, name, type, target, ownerAccountId);
         }
       } catch (e) {
         Alert.alert('Download failed', e instanceof Error ? e.message : String(e));
@@ -200,7 +211,7 @@ export default function EmailThreadScreen({ route, navigation }: Props) {
         setDownloadingBlobId(null);
       }
     },
-    [downloadingBlobId, mailAttachmentAction],
+    [downloadingBlobId, mailAttachmentAction, ownerAccountId],
   );
   const keywordDefs = useKeywordsStore((s) => s.keywords);
   const hydrateKeywords = useKeywordsStore((s) => s.hydrate);
@@ -226,10 +237,10 @@ export default function EmailThreadScreen({ route, navigation }: Props) {
       if (!fetched.keywords?.$seen) {
         if (markAsReadDelay > 0) {
           readTimer = setTimeout(() => {
-            if (!cancelled) void markRead(activeEmailId, jmapAccountId);
+            if (!cancelled) void markRead(activeEmailId, ownerAccountId);
           }, markAsReadDelay);
         } else {
-          void markRead(activeEmailId, jmapAccountId);
+          void markRead(activeEmailId, ownerAccountId);
         }
       }
     })();
@@ -237,24 +248,33 @@ export default function EmailThreadScreen({ route, navigation }: Props) {
       cancelled = true;
       if (readTimer) clearTimeout(readTimer);
     };
-  }, [activeEmailId, ensureDetail, markRead, markAsReadDelay, jmapAccountId, detailCache]);
+  }, [activeEmailId, ensureDetail, markRead, markAsReadDelay, ownerAccountId, detailCache]);
 
   const starred = !!email?.keywords?.$flagged;
   const unread = !!email && !email.keywords?.$seen;
 
+  // Move/archive/spam targets have to live in the same account as the folder
+  // the message was opened from — a shared (group account) message can't be
+  // filed into the user's own folders.
+  const scopedMailboxes = React.useMemo(
+    () => mailboxesForSiblingOf(mailboxes, currentMailboxId),
+    [mailboxes, currentMailboxId],
+  );
   const archiveMailbox = React.useMemo(
-    () => mailboxes.find((m) => m.role === 'archive'),
-    [mailboxes],
+    () => scopedMailboxes.find((m) => m.role === 'archive'),
+    [scopedMailboxes],
   );
   const junkMailbox = React.useMemo(
-    () => mailboxes.find((m) => m.role === 'junk' || m.role === 'spam'),
-    [mailboxes],
+    () => scopedMailboxes.find((m) => m.role === 'junk' || m.role === 'spam'),
+    [scopedMailboxes],
   );
   const inboxMailbox = React.useMemo(
-    () => mailboxes.find((m) => m.role === 'inbox'),
-    [mailboxes],
+    () => scopedMailboxes.find((m) => m.role === 'inbox'),
+    [scopedMailboxes],
   );
-  const isInJunk = !!(junkMailbox && email?.mailboxIds?.[junkMailbox.id]);
+  // `mailboxIds` comes back from the server unprefixed, so compare on the
+  // folder's raw id rather than the sidebar key.
+  const isInJunk = !!(junkMailbox && email?.mailboxIds?.[junkMailbox.originalId ?? junkMailbox.id]);
 
   // Optimistically write a message's keywords into the cache (the single source
   // of truth for every pane) and bump the version so the panes re-render.
@@ -271,7 +291,7 @@ export default function EmailThreadScreen({ route, navigation }: Props) {
     if (next[token]) delete next[token];
     else next[token] = true;
     updateLocalKeywords(email.id, next);
-    void setEmailKeywords(email.id, next);
+    void setEmailKeywords(email.id, next, ownerAccountId);
   };
 
   // Toggle the star on a specific message — used both by the toolbar (current
@@ -282,27 +302,27 @@ export default function EmailThreadScreen({ route, navigation }: Props) {
     else next.$flagged = true;
     const prev = detailCache.get(target.id);
     if (prev) { detailCache.set(target.id, { ...prev, keywords: next }); bumpCache(); }
-    void setEmailKeywords(target.id, next);
-  }, [detailCache, bumpCache]);
+    void setEmailKeywords(target.id, next, ownerAccountId);
+  }, [detailCache, bumpCache, ownerAccountId]);
 
   const onToggleStar = () => { if (email) toggleStarFor(email); };
 
   const onToggleUnread = () => {
     if (!email) return;
     if (unread) {
-      void markRead(email.id);
+      void markRead(email.id, ownerAccountId);
       updateLocalKeywords(email.id, { ...email.keywords, $seen: true });
     } else {
       const next = { ...email.keywords };
       delete next.$seen;
       updateLocalKeywords(email.id, next);
-      void setEmailKeywords(email.id, next);
+      void setEmailKeywords(email.id, next, ownerAccountId);
     }
   };
 
   const onDelete = () => {
     if (!email || !currentMailboxId) return;
-    const trash = findTrashMailbox(mailboxes);
+    const trash = findTrashMailbox(scopedMailboxes);
     if (!trash) {
       Alert.alert(
         t('email_list.error', 'Error'),
@@ -325,7 +345,7 @@ export default function EmailThreadScreen({ route, navigation }: Props) {
     if (!email || !currentMailboxId) return;
     setMoreMenuOpen(false);
     if (isInJunk) {
-      const target = inboxMailbox ?? mailboxes.find((m) => m.id !== currentMailboxId);
+      const target = inboxMailbox ?? scopedMailboxes.find((m) => m.id !== currentMailboxId);
       if (!target) return;
       void moveToMailbox(email.id, currentMailboxId, target.id);
     } else {
@@ -534,6 +554,7 @@ export default function EmailThreadScreen({ route, navigation }: Props) {
                 <EmailPane
                   id={item.id}
                   email={detailCache.get(item.id) ?? null}
+                  jmapAccountId={ownerAccountId}
                   ensureDetail={ensureDetail}
                   c={c}
                   styles={styles}
@@ -604,6 +625,7 @@ export default function EmailThreadScreen({ route, navigation }: Props) {
               emailId: email.id,
               blobId: email.blobId,
               subject: email.subject,
+              jmapAccountId: ownerAccountId,
             });
           }
         }}
@@ -611,7 +633,7 @@ export default function EmailThreadScreen({ route, navigation }: Props) {
           setMoreMenuOpen(false);
           if (!email?.blobId) return;
           try {
-            await shareEmailEml(email.blobId, email);
+            await shareEmailEml(email.blobId, email, undefined, ownerAccountId);
           } catch (e) {
             Alert.alert('Export failed', e instanceof Error ? e.message : String(e));
           }
@@ -621,7 +643,7 @@ export default function EmailThreadScreen({ route, navigation }: Props) {
       <MoveSheet
         visible={moveMenuOpen}
         onClose={() => setMoveMenuOpen(false)}
-        mailboxes={mailboxes}
+        mailboxes={scopedMailboxes}
         currentMailboxId={currentMailboxId}
         onPick={onMoveToMailbox}
       />
@@ -640,6 +662,8 @@ export default function EmailThreadScreen({ route, navigation }: Props) {
 interface EmailPaneProps {
   id: string;
   email: Email | null;
+  /** Owning account when the message lives in a shared/group mailbox. */
+  jmapAccountId?: string;
   ensureDetail: (id: string) => Promise<Email | null>;
   c: ThemePalette;
   styles: ReturnType<typeof makeStyles>;
@@ -659,7 +683,7 @@ interface EmailPaneProps {
 // scroll position and "show all attachments" toggle, and renders directly from
 // the email passed to it — neighbours show real content, not a placeholder.
 function EmailPane({
-  id, email, ensureDetail, c, styles, bottomBarHeight, attachmentPosition,
+  id, email, jmapAccountId, ensureDetail, c, styles, bottomBarHeight, attachmentPosition,
   hideInlineImageAttachments, downloadingBlobId, onToggleStar, onPressAttachment, onSwipe,
   onZoomChange,
 }: EmailPaneProps) {
@@ -806,6 +830,7 @@ function EmailPane({
         <EmailBodyView
           email={email}
           senderEmail={from?.email}
+          jmapAccountId={jmapAccountId}
           onSwipe={onSwipe}
           onZoomChange={(z) => { setPinching(z.pinching); onZoomChange(z); }}
         />

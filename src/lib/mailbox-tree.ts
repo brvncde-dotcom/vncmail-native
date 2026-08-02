@@ -3,6 +3,33 @@ import type { Mailbox } from '../api/types';
 export interface MailboxNode extends Mailbox {
   children: MailboxNode[];
   depth: number;
+  /**
+   * True for the virtual node that wraps a shared/group account's folders.
+   * It has no server-side mailbox behind it — it can be expanded but never
+   * selected or used as a move target.
+   */
+  isAccountNode?: boolean;
+}
+
+// Id prefix for the virtual per-shared-account node. Matches the webmail's
+// `shared-account-<accountId>` convention in [lib/utils.ts].
+export const SHARED_ACCOUNT_NODE_PREFIX = 'shared-account-';
+
+/** The user's own folders — everything not owned by a shared/group account. */
+export function ownMailboxes(mailboxes: Mailbox[]): Mailbox[] {
+  return mailboxes.filter((m) => !m.isShared);
+}
+
+/**
+ * Folders belonging to the same account as `mailboxId`. Role lookups (trash,
+ * archive, junk…) must run inside one account: moving a message out of a
+ * shared folder into the user's own Trash isn't a thing JMAP can express.
+ * Falls back to the user's own folders when the id isn't known.
+ */
+export function mailboxesForSiblingOf(mailboxes: Mailbox[], mailboxId: string | null): Mailbox[] {
+  const current = mailboxId ? mailboxes.find((m) => m.id === mailboxId) : undefined;
+  if (!current?.isShared) return ownMailboxes(mailboxes);
+  return mailboxes.filter((m) => m.isShared && m.accountId === current.accountId);
 }
 
 // Matches `ROLE_PRIORITY` from [lib/utils.ts] in the webmail.
@@ -53,7 +80,16 @@ function sortNodes(nodes: MailboxNode[]): void {
   for (const node of nodes) sortNodes(node.children);
 }
 
-export function buildMailboxTree(mailboxes: Mailbox[]): MailboxNode[] {
+function recalcDepths(nodes: MailboxNode[], base: number): void {
+  for (const n of nodes) {
+    n.depth = base;
+    if (n.children.length > 0) recalcDepths(n.children, base + 1);
+  }
+}
+
+// Build the root nodes for one account's folders (parent links only resolve
+// within an account — a shared folder can't nest under an own folder).
+function buildRoots(mailboxes: Mailbox[]): MailboxNode[] {
   const deduped = deduplicate(mailboxes);
   const map = new Map<string, MailboxNode>();
   const roots: MailboxNode[] = [];
@@ -69,16 +105,76 @@ export function buildMailboxTree(mailboxes: Mailbox[]): MailboxNode[] {
       roots.push(node);
     }
   }
+  return roots;
+}
 
-  const recalcDepths = (nodes: MailboxNode[], base: number) => {
-    for (const n of nodes) {
-      n.depth = base;
-      if (n.children.length > 0) recalcDepths(n.children, base + 1);
-    }
-  };
+const ACCOUNT_NODE_RIGHTS: Mailbox['myRights'] = {
+  mayReadItems: true,
+  mayAddItems: false,
+  mayRemoveItems: false,
+  maySetSeen: false,
+  maySetKeywords: false,
+  mayCreateChild: false,
+  mayRename: false,
+  mayDelete: false,
+  maySubmit: false,
+};
+
+/**
+ * Own folders first, then one collapsible node per shared/group account
+ * holding that account's folders — the same shape the webmail sidebar uses
+ * (GitHub #151), so a Stalwart group mailbox shows up as its own section
+ * rather than being mixed into the user's folder list.
+ */
+export function buildMailboxTree(mailboxes: Mailbox[]): MailboxNode[] {
+  const own = mailboxes.filter((m) => !m.isShared);
+  const shared = mailboxes.filter((m) => m.isShared);
+
+  const roots = buildRoots(own);
   recalcDepths(roots, 0);
   sortNodes(roots);
-  return roots;
+
+  if (shared.length === 0) return roots;
+
+  const byAccount = new Map<string, Mailbox[]>();
+  for (const m of shared) {
+    const accountId = m.accountId ?? 'unknown';
+    const list = byAccount.get(accountId);
+    if (list) list.push(m);
+    else byAccount.set(accountId, [m]);
+  }
+
+  const accountNodes: MailboxNode[] = [];
+  for (const [accountId, accountMailboxes] of byAccount) {
+    const accountRoots = buildRoots(accountMailboxes);
+    // Children sit at depth 1 so the account node reads as their header.
+    recalcDepths(accountRoots, 1);
+    sortNodes(accountRoots);
+
+    const accountName = accountMailboxes[0]?.accountName || accountId;
+    accountNodes.push({
+      id: `${SHARED_ACCOUNT_NODE_PREFIX}${accountId}`,
+      name: accountName,
+      sortOrder: 1000,
+      totalEmails: 0,
+      // Roll the account's unread up to the header so a collapsed section
+      // still shows there's something waiting.
+      unreadEmails: accountMailboxes.reduce((sum, m) => sum + (m.unreadEmails ?? 0), 0),
+      totalThreads: 0,
+      unreadThreads: 0,
+      myRights: ACCOUNT_NODE_RIGHTS,
+      isSubscribed: true,
+      accountId,
+      accountName,
+      isShared: true,
+      isAccountNode: true,
+      children: accountRoots,
+      depth: 0,
+    });
+  }
+  accountNodes.sort((a, b) => a.name.localeCompare(b.name));
+
+  return [...roots, ...accountNodes];
 }
 
 // Flatten the tree in traversal order, skipping children of collapsed nodes.

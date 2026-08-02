@@ -170,8 +170,8 @@ export async function downloadAttachment(
   });
 }
 
-export async function fetchRawEmail(blobId: string): Promise<string> {
-  const url = getDownloadUrl(blobId, 'email.eml', RFC822);
+export async function fetchRawEmail(blobId: string, accountId?: string): Promise<string> {
+  const url = getDownloadUrl(blobId, 'email.eml', RFC822, accountId);
   const r = await secureFetch(url, { headers: { Authorization: authHeader() } });
   if (!r.ok) throw new Error(`Download failed: ${r.status}`);
   return r.text();
@@ -186,12 +186,14 @@ export async function shareEmailEml(
   blobId: string,
   email?: Email | null,
   subjectFallback?: string,
+  // Owning account when the message lives in a shared/group mailbox.
+  accountId?: string,
 ): Promise<void> {
   const filename = email
     ? emailExportFilename(email, emailFileOptions())
     : safeFilename(subjectFallback);
   const dest = new File(Paths.cache, filename);
-  const url = getDownloadUrl(blobId, dest.name, RFC822);
+  const url = getDownloadUrl(blobId, dest.name, RFC822, accountId);
   const downloaded = await downloadInto(url, dest, Paths.cache);
   if (!(await Sharing.isAvailableAsync())) {
     throw new Error('Sharing is not available on this device');

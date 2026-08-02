@@ -67,13 +67,17 @@ export async function uploadBlob(
 export async function uploadBytes(
   bytes: Uint8Array,
   type: string,
+  // Blobs are account-scoped: a message imported into a shared/group account's
+  // folder has to be uploaded to that account, not the user's own.
+  accountId?: string,
 ): Promise<{ blobId: string; size: number; type: string }> {
   const session = jmapClient.currentSession;
   if (!session) throw new Error('Not connected');
 
+  const targetAccountId = accountId ?? jmapClient.accountId;
   const uploadUrl = session.uploadUrl.replace(
     '{accountId}',
-    encodeURIComponent(jmapClient.accountId),
+    encodeURIComponent(targetAccountId),
   );
 
   const response = await secureFetch(uploadUrl, {
@@ -99,7 +103,7 @@ export async function uploadBytes(
       type: typeof direct.type === 'string' && direct.type ? direct.type : type,
     };
   }
-  const nested = raw[jmapClient.accountId] as
+  const nested = raw[targetAccountId] as
     | { blobId?: string; type?: string; size?: number }
     | undefined;
   if (nested?.blobId) {

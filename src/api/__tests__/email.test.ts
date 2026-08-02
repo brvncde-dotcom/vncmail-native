@@ -5,12 +5,16 @@ vi.mock('../jmap-client', () => ({
   jmapClient: {
     accountId: 'acc-1',
     request: vi.fn(),
+    getAccountName: vi.fn(() => 'me@example.com'),
+    getSharedMailAccounts: vi.fn(() => []),
+    getMaxCallsInRequest: vi.fn(() => 16),
   },
 }));
 
 import { jmapClient } from '../jmap-client';
 import {
   getMailboxes,
+  getSharedMailboxes,
   queryEmails,
   getEmails,
   getFullEmail,
@@ -41,10 +45,104 @@ describe('email operations', () => {
 
       const result = await getMailboxes();
 
-      expect(result).toEqual(mailboxes);
+      // Own folders keep their raw ids and pick up ownership metadata.
+      expect(result).toEqual(mailboxes.map((m) => ({
+        ...m,
+        accountId: 'acc-1',
+        accountName: 'me@example.com',
+        isShared: false,
+      })));
       expect(mockRequest).toHaveBeenCalledWith(
         [['Mailbox/get', { accountId: 'acc-1' }, '0']],
       );
+    });
+  });
+
+  describe('getSharedMailboxes', () => {
+    const mockShared = jmapClient.getSharedMailAccounts as ReturnType<typeof vi.fn>;
+
+    it('returns nothing when the session has no shared accounts', async () => {
+      mockShared.mockReturnValue([]);
+
+      expect(await getSharedMailboxes()).toEqual([]);
+      expect(mockRequest).not.toHaveBeenCalled();
+    });
+
+    it('prefixes ids and parent links per owning account', async () => {
+      mockShared.mockReturnValue([{ id: 'grp-1', name: 'Support' }]);
+      mockRequest.mockResolvedValue({
+        methodResponses: [['Mailbox/get', {
+          list: [
+            { id: 'mb-1', name: 'Inbox', role: 'inbox', totalEmails: 4, unreadEmails: 2 },
+            { id: 'mb-2', name: 'Escalations', parentId: 'mb-1', totalEmails: 1, unreadEmails: 0 },
+          ],
+        }, '0']],
+      });
+
+      const result = await getSharedMailboxes();
+
+      expect(mockRequest).toHaveBeenCalledWith(
+        [['Mailbox/get', { accountId: 'grp-1' }, '0']],
+      );
+      expect(result).toEqual([
+        {
+          id: 'grp-1:mb-1',
+          originalId: 'mb-1',
+          name: 'Inbox',
+          role: 'inbox',
+          parentId: undefined,
+          totalEmails: 4,
+          unreadEmails: 2,
+          accountId: 'grp-1',
+          accountName: 'Support',
+          isShared: true,
+        },
+        {
+          id: 'grp-1:mb-2',
+          originalId: 'mb-2',
+          name: 'Escalations',
+          parentId: 'grp-1:mb-1',
+          totalEmails: 1,
+          unreadEmails: 0,
+          accountId: 'grp-1',
+          accountName: 'Support',
+          isShared: true,
+        },
+      ]);
+    });
+
+    it('maps each response back to its account and skips the ones that errored', async () => {
+      mockShared.mockReturnValue([
+        { id: 'grp-1', name: 'Support' },
+        { id: 'grp-2', name: 'Sales' },
+      ]);
+      mockRequest.mockResolvedValue({
+        methodResponses: [
+          ['error', { type: 'accountNotFound' }, '0'],
+          ['Mailbox/get', { list: [{ id: 'mb-9', name: 'Inbox', role: 'inbox' }] }, '1'],
+        ],
+      });
+
+      const result = await getSharedMailboxes();
+
+      expect(result.map((m) => m.id)).toEqual(['grp-2:mb-9']);
+      expect(result[0].accountName).toBe('Sales');
+    });
+
+    it('chunks requests to maxCallsInRequest', async () => {
+      mockShared.mockReturnValue([
+        { id: 'grp-1', name: 'Support' },
+        { id: 'grp-2', name: 'Sales' },
+        { id: 'grp-3', name: 'Billing' },
+      ]);
+      (jmapClient.getMaxCallsInRequest as ReturnType<typeof vi.fn>).mockReturnValue(2);
+      mockRequest.mockResolvedValue({ methodResponses: [] });
+
+      await getSharedMailboxes();
+
+      expect(mockRequest).toHaveBeenCalledTimes(2);
+      expect(mockRequest.mock.calls[0][0]).toHaveLength(2);
+      expect(mockRequest.mock.calls[1][0]).toHaveLength(1);
     });
   });
 

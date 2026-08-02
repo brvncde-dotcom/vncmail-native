@@ -14,33 +14,112 @@ const EMAIL_FULL_PROPERTIES = [
   'attachments', 'blobId', 'bcc', 'replyTo', 'sentAt',
 ];
 
-export async function getMailboxes(): Promise<Mailbox[]> {
-  const accountId = jmapClient.accountId;
-  const res = await jmapClient.request(
-    [['Mailbox/get', { accountId }, '0']],
-  );
-  return res.methodResponses[0][1].list;
+// Prefix a shared account's folder ids so they can't collide with the user's
+// own. Matches the webmail's `${accountId}:${mailboxId}` scheme.
+function sharedMailboxId(accountId: string, rawId: string): string {
+  return `${accountId}:${rawId}`;
+}
+
+/** Inverse of {@link sharedMailboxId}; a no-op for the user's own folders. */
+export function unprefixMailboxId(id: string, accountId?: string): string {
+  if (!accountId) return id;
+  const prefix = `${accountId}:`;
+  return id.startsWith(prefix) ? id.slice(prefix.length) : id;
+}
+
+// Stamp ownership onto a raw Mailbox/get result. Own folders keep their raw
+// ids; a shared account's are prefixed and remember their `originalId` so
+// server calls can still address them.
+function tagMailbox(
+  mailbox: Mailbox,
+  accountId: string,
+  accountName: string | undefined,
+  isShared: boolean,
+): Mailbox {
+  if (!isShared) {
+    return { ...mailbox, accountId, accountName, isShared: false };
+  }
+  return {
+    ...mailbox,
+    id: sharedMailboxId(accountId, mailbox.id),
+    originalId: mailbox.id,
+    parentId: mailbox.parentId ? sharedMailboxId(accountId, mailbox.parentId) : mailbox.parentId,
+    accountId,
+    accountName,
+    isShared: true,
+  };
+}
+
+export async function getMailboxes(accountId?: string): Promise<Mailbox[]> {
+  return (await getMailboxesWithState(accountId)).list;
 }
 
 // Variant that also returns the JMAP `state` token so callers can later issue
 // Mailbox/changes(sinceState=…) to fetch only what changed.
-export async function getMailboxesWithState(): Promise<{ list: Mailbox[]; state: string }> {
-  const accountId = jmapClient.accountId;
+export async function getMailboxesWithState(
+  accountIdOverride?: string,
+): Promise<{ list: Mailbox[]; state: string }> {
+  const accountId = accountIdOverride ?? jmapClient.accountId;
+  const isShared = accountId !== jmapClient.accountId;
   const res = await jmapClient.request(
     [['Mailbox/get', { accountId }, '0']],
   );
   const body = res.methodResponses[0][1];
-  return { list: body.list as Mailbox[], state: body.state as string };
+  const list = ((body.list as Mailbox[]) ?? []).map((m) =>
+    tagMailbox(m, accountId, jmapClient.getAccountName(accountId), isShared),
+  );
+  return { list, state: body.state as string };
 }
 
-export async function getMailboxesByIds(ids: string[]): Promise<{ list: Mailbox[]; state: string }> {
+/**
+ * Every folder of every shared/group account in this session, ready to merge
+ * into the sidebar next to the user's own. One request carrying a Mailbox/get
+ * per account, chunked to the server's maxCallsInRequest. An account that
+ * errors (revoked access, server hiccup) is skipped rather than sinking the
+ * whole list.
+ */
+export async function getSharedMailboxes(): Promise<Mailbox[]> {
+  const accounts = jmapClient.getSharedMailAccounts();
+  if (accounts.length === 0) return [];
+
+  const perRequest = Math.max(1, jmapClient.getMaxCallsInRequest());
+  const out: Mailbox[] = [];
+  for (let i = 0; i < accounts.length; i += perRequest) {
+    const chunk = accounts.slice(i, i + perRequest);
+    const res = await jmapClient.request(
+      chunk.map((acc, idx): JMAPMethodCall => [
+        'Mailbox/get',
+        { accountId: acc.id },
+        String(idx),
+      ]),
+    );
+    for (const [name, body, callId] of res.methodResponses) {
+      if (name !== 'Mailbox/get') continue;
+      const acc = chunk[Number(callId)];
+      if (!acc) continue;
+      for (const m of (body.list as Mailbox[]) ?? []) {
+        out.push(tagMailbox(m, acc.id, acc.name, true));
+      }
+    }
+  }
+  return out;
+}
+
+export async function getMailboxesByIds(
+  ids: string[],
+  accountIdOverride?: string,
+): Promise<{ list: Mailbox[]; state: string }> {
   if (ids.length === 0) return { list: [], state: '' };
-  const accountId = jmapClient.accountId;
+  const accountId = accountIdOverride ?? jmapClient.accountId;
+  const isShared = accountId !== jmapClient.accountId;
   const res = await jmapClient.request(
     [['Mailbox/get', { accountId, ids }, '0']],
   );
   const body = res.methodResponses[0][1];
-  return { list: body.list as Mailbox[], state: body.state as string };
+  const list = ((body.list as Mailbox[]) ?? []).map((m) =>
+    tagMailbox(m, accountId, jmapClient.getAccountName(accountId), isShared),
+  );
+  return { list, state: body.state as string };
 }
 
 export interface MailboxChangesResult {
@@ -54,8 +133,11 @@ export interface MailboxChangesResult {
 
 // Returns null when the server can't compute the diff (typically
 // `cannotCalculateChanges`); callers should fall back to a full Mailbox/get.
-export async function getMailboxChanges(sinceState: string): Promise<MailboxChangesResult | null> {
-  const accountId = jmapClient.accountId;
+export async function getMailboxChanges(
+  sinceState: string,
+  accountIdOverride?: string,
+): Promise<MailboxChangesResult | null> {
+  const accountId = accountIdOverride ?? jmapClient.accountId;
   const res = await jmapClient.request(
     [['Mailbox/changes', { accountId, sinceState }, '0']],
   );
@@ -73,8 +155,9 @@ export async function getMailboxChanges(sinceState: string): Promise<MailboxChan
 
 export async function createMailbox(
   data: { name: string; parentId?: string | null },
+  accountIdOverride?: string,
 ): Promise<string> {
-  const accountId = jmapClient.accountId;
+  const accountId = accountIdOverride ?? jmapClient.accountId;
   const cid = 'new-mailbox';
   const res = await jmapClient.request([
     ['Mailbox/set', {
@@ -102,8 +185,9 @@ export async function createMailbox(
 export async function updateMailbox(
   id: string,
   changes: { name?: string; parentId?: string | null },
+  accountIdOverride?: string,
 ): Promise<void> {
-  const accountId = jmapClient.accountId;
+  const accountId = accountIdOverride ?? jmapClient.accountId;
   const res = await jmapClient.request([
     ['Mailbox/set', { accountId, update: { [id]: changes } }, '0'],
   ]);
@@ -117,8 +201,8 @@ export async function updateMailbox(
   }
 }
 
-export async function deleteMailbox(id: string): Promise<void> {
-  const accountId = jmapClient.accountId;
+export async function deleteMailbox(id: string, accountIdOverride?: string): Promise<void> {
+  const accountId = accountIdOverride ?? jmapClient.accountId;
   const res = await jmapClient.request([
     ['Mailbox/set', { accountId, destroy: [id] }, '0'],
   ]);
@@ -155,9 +239,11 @@ export async function queryEmails(
     limit?: number;
     sort?: Array<{ property: string; isAscending: boolean }>;
     filter?: Record<string, unknown>;
+    /** Owning JMAP account when the mailbox belongs to a shared account. */
+    accountId?: string;
   },
 ): Promise<{ ids: string[]; total: number; queryState?: string }> {
-  const accountId = jmapClient.accountId;
+  const accountId = options?.accountId ?? jmapClient.accountId;
   const filter = buildMailboxQueryFilter(mailboxId, options?.filter);
   const res = await jmapClient.request([
     ['Email/query', {
@@ -196,9 +282,11 @@ export async function getEmailQueryChanges(
     filter?: Record<string, unknown>;
     upToId?: string;
     maxChanges?: number;
+    /** Owning JMAP account when the mailbox belongs to a shared account. */
+    accountId?: string;
   },
 ): Promise<EmailQueryChangesResult | null> {
-  const accountId = jmapClient.accountId;
+  const accountId = options?.accountId ?? jmapClient.accountId;
   const filter = buildMailboxQueryFilter(mailboxId, options?.filter);
   const args: Record<string, unknown> = {
     accountId,
@@ -222,8 +310,8 @@ export async function getEmailQueryChanges(
   };
 }
 
-export async function getEmails(ids: string[]): Promise<Email[]> {
-  const accountId = jmapClient.accountId;
+export async function getEmails(ids: string[], accountIdOverride?: string): Promise<Email[]> {
+  const accountId = accountIdOverride ?? jmapClient.accountId;
   const res = await jmapClient.request([
     ['Email/get', { accountId, ids, properties: EMAIL_LIST_PROPERTIES }, '0'],
   ]);
@@ -233,18 +321,21 @@ export async function getEmails(ids: string[]): Promise<Email[]> {
 // Returns the Email/get response with the JMAP `state` token. Used by the
 // store so we can later issue Email/changes(sinceState=…) for incremental
 // updates instead of re-fetching the full list.
-export async function getEmailsWithState(ids: string[]): Promise<{ list: Email[]; state: string }> {
+export async function getEmailsWithState(
+  ids: string[],
+  accountIdOverride?: string,
+): Promise<{ list: Email[]; state: string }> {
   if (ids.length === 0) {
     // Email/get with an empty id list still returns a state token; useful for
     // priming the store after an empty mailbox query.
-    const accountId = jmapClient.accountId;
+    const accountId = accountIdOverride ?? jmapClient.accountId;
     const res = await jmapClient.request([
       ['Email/get', { accountId, ids: [], properties: EMAIL_LIST_PROPERTIES }, '0'],
     ]);
     const body = res.methodResponses[0][1];
     return { list: [], state: body.state as string };
   }
-  const accountId = jmapClient.accountId;
+  const accountId = accountIdOverride ?? jmapClient.accountId;
   const res = await jmapClient.request([
     ['Email/get', { accountId, ids, properties: EMAIL_LIST_PROPERTIES }, '0'],
   ]);
@@ -266,8 +357,9 @@ export interface EmailChangesResult {
 export async function getEmailChanges(
   sinceState: string,
   maxChanges?: number,
+  accountIdOverride?: string,
 ): Promise<EmailChangesResult | null> {
-  const accountId = jmapClient.accountId;
+  const accountId = accountIdOverride ?? jmapClient.accountId;
   const args: Record<string, unknown> = { accountId, sinceState };
   if (maxChanges) args.maxChanges = maxChanges;
   const res = await jmapClient.request([['Email/changes', args, '0']]);
@@ -306,9 +398,9 @@ export async function getFullEmail(id: string, accountIdOverride?: string): Prom
 // Batch variant for offline sync. JMAP servers cap how many objects can be
 // returned in a single Email/get; the caller should chunk to that ceiling
 // (the client exposes maxObjectsInGet via getMaxObjectsInGet()).
-export async function getFullEmails(ids: string[]): Promise<Email[]> {
+export async function getFullEmails(ids: string[], accountIdOverride?: string): Promise<Email[]> {
   if (ids.length === 0) return [];
-  const accountId = jmapClient.accountId;
+  const accountId = accountIdOverride ?? jmapClient.accountId;
   const res = await jmapClient.request([
     ['Email/get', {
       accountId,
@@ -332,8 +424,9 @@ export async function importEmailBlob(
   blobId: string,
   mailboxId: string,
   keywords: Record<string, boolean> = { $seen: true },
+  accountIdOverride?: string,
 ): Promise<string> {
-  const accountId = jmapClient.accountId;
+  const accountId = accountIdOverride ?? jmapClient.accountId;
   const res = await jmapClient.request([
     ['Email/import', {
       accountId,
@@ -352,8 +445,8 @@ export async function importEmailBlob(
   return id;
 }
 
-export async function getThread(threadId: string): Promise<Thread> {
-  const accountId = jmapClient.accountId;
+export async function getThread(threadId: string, accountIdOverride?: string): Promise<Thread> {
+  const accountId = accountIdOverride ?? jmapClient.accountId;
   const res = await jmapClient.request(
     [['Thread/get', { accountId, ids: [threadId] }, '0']],
   );
@@ -375,8 +468,9 @@ export async function moveEmail(
   emailId: string,
   fromMailboxId: string,
   toMailboxId: string,
+  accountIdOverride?: string,
 ): Promise<void> {
-  const accountId = jmapClient.accountId;
+  const accountId = accountIdOverride ?? jmapClient.accountId;
   await jmapClient.request([
     ['Email/set', {
       accountId,
@@ -395,9 +489,10 @@ export async function moveEmails(
   ids: string[],
   fromMailboxId: string,
   toMailboxId: string,
+  accountIdOverride?: string,
 ): Promise<void> {
   if (ids.length === 0) return;
-  const accountId = jmapClient.accountId;
+  const accountId = accountIdOverride ?? jmapClient.accountId;
   const update: Record<string, Record<string, unknown>> = {};
   for (const id of ids) {
     update[id] = {
@@ -413,22 +508,24 @@ export async function deleteEmails(
   ids: string[],
   trashMailboxId: string,
   currentMailboxId: string,
+  accountIdOverride?: string,
 ): Promise<void> {
   if (ids.length === 0) return;
   if (currentMailboxId === trashMailboxId) {
-    const accountId = jmapClient.accountId;
+    const accountId = accountIdOverride ?? jmapClient.accountId;
     await jmapClient.request([['Email/set', { accountId, destroy: ids }, '0']]);
   } else {
-    await moveEmails(ids, currentMailboxId, trashMailboxId);
+    await moveEmails(ids, currentMailboxId, trashMailboxId, accountIdOverride);
   }
 }
 
 // Apply keyword maps to several emails in one round-trip.
 export async function setKeywordsForEmails(
   updates: Array<{ id: string; keywords: Record<string, boolean> }>,
+  accountIdOverride?: string,
 ): Promise<void> {
   if (updates.length === 0) return;
-  const accountId = jmapClient.accountId;
+  const accountId = accountIdOverride ?? jmapClient.accountId;
   const update: Record<string, { keywords: Record<string, boolean> }> = {};
   for (const u of updates) update[u.id] = { keywords: u.keywords };
   await jmapClient.request([['Email/set', { accountId, update }, '0']]);
@@ -439,9 +536,10 @@ export async function setKeywordsForEmails(
 // the entire map, so we don't need to compute a diff against the current state.
 export async function restoreEmailMailboxes(
   items: Array<{ id: string; mailboxIds: Record<string, boolean> }>,
+  accountIdOverride?: string,
 ): Promise<void> {
   if (items.length === 0) return;
-  const accountId = jmapClient.accountId;
+  const accountId = accountIdOverride ?? jmapClient.accountId;
   const update: Record<string, { mailboxIds: Record<string, true> }> = {};
   for (const item of items) {
     const onlyTrue: Record<string, true> = {};
@@ -462,15 +560,16 @@ export async function restoreEmailMailboxes(
 export async function setEmailMailboxes(
   emailId: string,
   mailboxIds: Record<string, boolean>,
+  accountIdOverride?: string,
 ): Promise<void> {
-  await restoreEmailMailboxes([{ id: emailId, mailboxIds }]);
+  await restoreEmailMailboxes([{ id: emailId, mailboxIds }], accountIdOverride);
 }
 
 // Permanently destroy emails (no move-to-trash). Idempotent: destroying an
 // already-gone id is a no-op on replay.
-export async function destroyEmails(ids: string[]): Promise<void> {
+export async function destroyEmails(ids: string[], accountIdOverride?: string): Promise<void> {
   if (ids.length === 0) return;
-  const accountId = jmapClient.accountId;
+  const accountId = accountIdOverride ?? jmapClient.accountId;
   await jmapClient.request([['Email/set', { accountId, destroy: ids }, '0']]);
 }
 
@@ -482,9 +581,10 @@ export async function archiveEmails(
   archiveMailboxId: string,
   mode: 'single' | 'year' | 'month',
   existingMailboxes: Mailbox[],
+  accountIdOverride?: string,
 ): Promise<void> {
   if (emails.length === 0) return;
-  const accountId = jmapClient.accountId;
+  const accountId = accountIdOverride ?? jmapClient.accountId;
 
   if (mode === 'single') {
     const updates = Object.fromEntries(
@@ -595,14 +695,15 @@ export async function deleteEmail(
   emailId: string,
   trashMailboxId: string,
   currentMailboxId: string,
+  accountIdOverride?: string,
 ): Promise<void> {
   if (currentMailboxId === trashMailboxId) {
-    const accountId = jmapClient.accountId;
+    const accountId = accountIdOverride ?? jmapClient.accountId;
     await jmapClient.request([
       ['Email/set', { accountId, destroy: [emailId] }, '0'],
     ]);
   } else {
-    await moveEmail(emailId, currentMailboxId, trashMailboxId);
+    await moveEmail(emailId, currentMailboxId, trashMailboxId, accountIdOverride);
   }
 }
 
@@ -610,8 +711,9 @@ export async function searchEmails(
   query: string,
   mailboxId?: string,
   limit = 30,
+  accountIdOverride?: string,
 ): Promise<string[]> {
-  const accountId = jmapClient.accountId;
+  const accountId = accountIdOverride ?? jmapClient.accountId;
   const filter: Record<string, unknown> = { text: toWildcardQuery(query) };
   if (mailboxId) filter.inMailbox = mailboxId;
 

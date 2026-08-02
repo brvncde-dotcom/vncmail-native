@@ -15,7 +15,9 @@ type Props = NativeStackScreenProps<RootStackParamList, 'EmailSource'>;
 export default function EmailSourceScreen({ route, navigation }: Props) {
   const c = useColors();
   const styles = React.useMemo(() => makeStyles(c), [c]);
-  const { blobId, subject } = route.params;
+  // Blobs are account-scoped, so a message from a shared/group mailbox has
+  // to be fetched against its owning account.
+  const { blobId, subject, jmapAccountId } = route.params;
   const [raw, setRaw] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
 
@@ -23,18 +25,18 @@ export default function EmailSourceScreen({ route, navigation }: Props) {
     let cancelled = false;
     void (async () => {
       try {
-        const text = await fetchRawEmail(blobId);
+        const text = await fetchRawEmail(blobId, jmapAccountId);
         if (!cancelled) setRaw(text);
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load email source');
       }
     })();
     return () => { cancelled = true; };
-  }, [blobId]);
+  }, [blobId, jmapAccountId]);
 
   const onShare = async () => {
     try {
-      await shareEmailEml(blobId, undefined, subject);
+      await shareEmailEml(blobId, undefined, subject, jmapAccountId);
     } catch (e) {
       Alert.alert('Share failed', e instanceof Error ? e.message : String(e));
     }
