@@ -9,6 +9,11 @@ import {
 import { typography, type ThemePalette } from '../theme/tokens';
 import { useColors } from '../theme/colors';
 import type { SwipeAction, SwipeMode } from '../stores/settings-store';
+import {
+  shouldClaimGesture, dragOffset, resolveRelease, exitsRow,
+  COMMIT_THRESHOLD, REVEAL_WIDTH,
+  type SwipeConfig,
+} from './swipe-gesture';
 
 interface SwipeableRowProps {
   children: React.ReactNode;
@@ -26,17 +31,6 @@ interface SwipeableRowProps {
   mode?: SwipeMode;
 }
 
-// Instant mode: distance the user must drag past on release to fire the action.
-const COMMIT_THRESHOLD = 96;
-// Reveal mode: drag past this on release to snap to the open (revealed) state.
-const ACTIVATION_THRESHOLD = 32;
-// Reveal mode: width of the action band shown when revealed.
-const REVEAL_WIDTH = 88;
-
-const DIRECTION_BIAS = 1.5;       // dx must dominate dy by this factor
-const MIN_DX_TO_CLAIM = 6;
-const MAX_DRAG_OVERSHOOT_INSTANT = 240;
-const MAX_DRAG_OVERSHOOT_REVEAL = REVEAL_WIDTH * 1.4;
 // Distance the row flies off-screen by before the action callback fires.
 const EXIT_DISTANCE = 600;
 
@@ -58,12 +52,6 @@ function actionLabel(action: SwipeAction, context: { unread: boolean; starred: b
   return ACTION_META[action].defaultLabel;
 }
 
-// Actions that visibly remove the row from the list (so the row should fly off
-// instead of snapping back). Toggle-style actions stay in place.
-function exitsRow(action: SwipeAction): boolean {
-  return action === 'archive' || action === 'delete' || action === 'spam' || action === 'move';
-}
-
 export function SwipeableRow({
   children, leftAction, rightAction, context, onAction, mode = 'instant',
 }: SwipeableRowProps) {
@@ -73,19 +61,37 @@ export function SwipeableRow({
   const claimed = useRef(false);
   const widthRef = useRef(Dimensions.get('window').width);
 
+  // The PanResponder below is built once, so its handlers close over the props
+  // of the render that built it. Reading them through a ref instead keeps the
+  // gesture in step with the row it is actually attached to. Three ways that
+  // went wrong before: changing a swipe action in settings kept firing the old
+  // one; entering selection mode (which passes 'none') still fired actions;
+  // and `onAction` captured a `handleSwipeAction` from before the mailbox ids
+  // had loaded, so on a slow connection swipe did nothing even untouched.
+  // Same idiom as RichTextEditor's callback refs.
+  const latest = useRef<SwipeConfig & { onAction: (a: SwipeAction) => void }>({
+    leftAction, rightAction, mode, onAction,
+  });
+  latest.current = { leftAction, rightAction, mode, onAction };
+
   // Reveal-mode-only state: which side (if any) is currently sitting open.
   const openSideRef = useRef<'left' | 'right' | null>(null);
   const [openSide, setOpenSide] = useState<'left' | 'right' | null>(null);
 
+  const springTo = (toValue: number) => {
+    Animated.spring(dx, { toValue, useNativeDriver: true, speed: 24, bounciness: 4 }).start();
+  };
+  // Spring back to rest without changing which side is open.
+  const settle = () => springTo(0);
+
   const close = () => {
-    Animated.spring(dx, { toValue: 0, useNativeDriver: true, speed: 24, bounciness: 4 }).start();
+    springTo(0);
     openSideRef.current = null;
     setOpenSide(null);
   };
 
   const openTo = (side: 'left' | 'right') => {
-    const target = side === 'right' ? REVEAL_WIDTH : -REVEAL_WIDTH;
-    Animated.spring(dx, { toValue: target, useNativeDriver: true, speed: 24, bounciness: 4 }).start();
+    springTo(side === 'right' ? REVEAL_WIDTH : -REVEAL_WIDTH);
     openSideRef.current = side;
     setOpenSide(side);
   };
@@ -101,14 +107,14 @@ export function SwipeableRow({
         duration: 180,
         useNativeDriver: true,
       }).start(() => {
-        onAction(action);
+        latest.current.onAction(action);
         // The row is about to be removed; reset translation in case it isn't
         // (e.g. the action failed silently) so we don't leave it off-screen.
         dx.setValue(0);
       });
     } else {
-      onAction(action);
-      Animated.spring(dx, { toValue: 0, useNativeDriver: true, speed: 24, bounciness: 4 }).start();
+      latest.current.onAction(action);
+      settle();
     }
   };
 
@@ -117,77 +123,56 @@ export function SwipeableRow({
     if (action === 'none') return;
     if (exitsRow(action)) {
       // Let the row collapse a frame, then fire so the parent's list update
-      // has a clean starting point.
-      requestAnimationFrame(() => onAction(action));
+      // has a clean starting point. Deferred, so read the callback on arrival
+      // rather than capturing today's.
+      requestAnimationFrame(() => latest.current.onAction(action));
     } else {
-      onAction(action);
+      latest.current.onAction(action);
     }
   };
 
-  const responder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => false,
-      onMoveShouldSetPanResponder: (_, g) => {
-        if (Math.abs(g.dx) < MIN_DX_TO_CLAIM) return false;
-        if (Math.abs(g.dx) < Math.abs(g.dy) * DIRECTION_BIAS) return false;
-        // Reveal mode: if a side is already open, allow the gesture so the
-        // user can drag it closed.
-        if (mode === 'reveal' && openSideRef.current === null) {
-          if (g.dx > 0 && rightAction === 'none') return false;
-          if (g.dx < 0 && leftAction === 'none') return false;
-        } else if (mode !== 'reveal') {
-          if (g.dx > 0 && rightAction === 'none') return false;
-          if (g.dx < 0 && leftAction === 'none') return false;
-        }
-        claimed.current = true;
-        return true;
-      },
-      onPanResponderMove: (_, g) => {
-        const overshoot = mode === 'reveal' ? MAX_DRAG_OVERSHOOT_REVEAL : MAX_DRAG_OVERSHOOT_INSTANT;
-        const base =
-          mode === 'reveal'
-            ? openSideRef.current === 'right' ? REVEAL_WIDTH
-              : openSideRef.current === 'left' ? -REVEAL_WIDTH
-              : 0
-            : 0;
-        const next = base + g.dx;
-        const clamped = Math.max(-overshoot, Math.min(overshoot, next));
-        dx.setValue(clamped);
-      },
-      onPanResponderRelease: (_, g) => {
-        claimed.current = false;
-        if (mode === 'reveal') {
-          const base =
-            openSideRef.current === 'right' ? REVEAL_WIDTH
-              : openSideRef.current === 'left' ? -REVEAL_WIDTH
-              : 0;
-          const finalDx = base + g.dx;
-          if (finalDx > ACTIVATION_THRESHOLD && rightAction !== 'none') {
-            openTo('right');
-          } else if (finalDx < -ACTIVATION_THRESHOLD && leftAction !== 'none') {
-            openTo('left');
-          } else {
-            close();
+  // Built once. Every handler reads `latest.current`, so a rebuild would be a
+  // no-op anyway — which is what makes useMemo (free to discard its cache)
+  // safe here.
+  const responder = React.useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => false,
+        onMoveShouldSetPanResponder: (_, g) => {
+          if (!shouldClaimGesture(g, latest.current, openSideRef.current)) return false;
+          claimed.current = true;
+          return true;
+        },
+        onPanResponderMove: (_, g) => {
+          dx.setValue(dragOffset(g, latest.current, openSideRef.current));
+        },
+        onPanResponderRelease: (_, g) => {
+          claimed.current = false;
+          const outcome = resolveRelease(g, latest.current, openSideRef.current);
+          switch (outcome.kind) {
+            case 'open':
+              openTo(outcome.side);
+              break;
+            case 'close':
+              close();
+              break;
+            case 'fire':
+              fly(outcome.direction * (widthRef.current || EXIT_DISTANCE), outcome.action);
+              break;
+            case 'settle':
+              settle();
+              break;
           }
-          return;
-        }
-        // Instant mode: fire on release-past-threshold, no second tap.
-        if ((g.dx >= COMMIT_THRESHOLD || (g.dx > 40 && g.vx >= 0.5)) && rightAction !== 'none') {
-          fly(widthRef.current || EXIT_DISTANCE, rightAction);
-        } else if ((g.dx <= -COMMIT_THRESHOLD || (g.dx < -40 && g.vx <= -0.5)) && leftAction !== 'none') {
-          fly(-(widthRef.current || EXIT_DISTANCE), leftAction);
-        } else {
-          Animated.spring(dx, { toValue: 0, useNativeDriver: true, speed: 24, bounciness: 4 }).start();
-        }
-      },
-      onPanResponderTerminate: () => {
-        if (mode === 'reveal') close();
-        else Animated.spring(dx, { toValue: 0, useNativeDriver: true, speed: 24, bounciness: 4 }).start();
-        claimed.current = false;
-      },
-      onPanResponderTerminationRequest: () => !claimed.current,
-    }),
-  ).current;
+        },
+        onPanResponderTerminate: () => {
+          if (latest.current.mode === 'reveal') close();
+          else settle();
+          claimed.current = false;
+        },
+        onPanResponderTerminationRequest: () => !claimed.current,
+      }),
+    [],
+  );
 
   const onLayout = (e: { nativeEvent: { layout: { width: number } } }) => {
     widthRef.current = e.nativeEvent.layout.width;
