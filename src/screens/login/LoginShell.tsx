@@ -11,7 +11,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Constants from 'expo-constants';
 import { ArrowLeft, X } from 'lucide-react-native';
-import { spacing, typography, type ThemePalette } from '../../theme/tokens';
+import { spacing, typography, componentSizes, type ThemePalette } from '../../theme/tokens';
 import { useColors } from '../../theme/colors';
 
 const APP_VERSION = Constants.expoConfig?.version ?? '0.0.0';
@@ -93,11 +93,11 @@ function makeStyles(c: ThemePalette) {
       alignItems: 'center',
       justifyContent: 'space-between',
       paddingHorizontal: spacing.lg,
-      height: 44,
+      height: componentSizes.headerHeight,
     },
     headerButton: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
     content: {
-      paddingHorizontal: spacing.xxl,
+      paddingHorizontal: spacing.lg,
       paddingBottom: spacing.xxxl,
     },
     contentCentered: { flexGrow: 1, justifyContent: 'center' },

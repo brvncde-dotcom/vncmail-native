@@ -71,8 +71,8 @@ export default function ChooseStep({
             style={styles.logo}
             resizeMode="contain"
           />
-          <Text style={styles.appName}>Bulwark Mail</Text>
-          <Text style={styles.tagline}>Secure. Private. Yours.</Text>
+          <Text style={styles.title}>Bulwark Mail</Text>
+          <Text style={styles.subtitle}>Choose how you&apos;d like to sign in.</Text>
         </View>
       )}
 
@@ -107,7 +107,7 @@ export default function ChooseStep({
           <OptionTile
             emphasis="primary"
             title={`Another account on ${hostOf(knownServerUrl)}`}
-            description="Server already known — no setup needed"
+            description="We already know this server, so there's no setup"
             renderIcon={(color, size) => <Plus size={size} color={color} />}
             onPress={onUseKnownServer}
             disabled={disabled}
@@ -116,7 +116,7 @@ export default function ChooseStep({
           <OptionTile
             emphasis="primary"
             title="Scan a sign-in code"
-            description="Already signed in on the web? Fastest way in."
+            description="The fastest way in if you're signed in on the web"
             renderIcon={(color, size) => <QrCode size={size} color={color} />}
             onPress={onScan}
             disabled={disabled}
@@ -152,10 +152,8 @@ export default function ChooseStep({
 function makeStyles(c: ThemePalette) {
   return StyleSheet.create({
     root: { gap: spacing.xl },
-    branding: { alignItems: 'center', gap: spacing.xs, marginBottom: spacing.md },
-    logo: { width: 64, height: 64, marginBottom: spacing.sm },
-    appName: { ...typography.h1, color: c.text },
-    tagline: { ...typography.caption, color: c.textMuted },
+    branding: { gap: spacing.xs, marginBottom: spacing.md },
+    logo: { width: 40, height: 40, marginBottom: spacing.sm },
 
     addHeading: { gap: spacing.xs },
     title: { ...typography.h1, color: c.text },
@@ -164,7 +162,7 @@ function makeStyles(c: ThemePalette) {
     accountList: { gap: spacing.md },
     accountRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
     avatar: { width: 36, height: 36, borderRadius: radius.full, alignItems: 'center', justifyContent: 'center' },
-    avatarText: { ...typography.captionMedium, color: '#ffffff' },
+    avatarText: { ...typography.bodySemibold, color: c.primaryForeground },
     accountText: { flex: 1 },
     accountName: { ...typography.bodyMedium, color: c.text },
     accountEmail: { ...typography.caption, color: c.textMuted },

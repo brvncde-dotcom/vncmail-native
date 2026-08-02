@@ -1,7 +1,7 @@
 import React from 'react';
 import { View, Text, StyleSheet, ActivityIndicator, Image } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { spacing, radius, typography, type ThemePalette } from '../../theme/tokens';
+import { spacing, radius, typography, componentSizes, type ThemePalette } from '../../theme/tokens';
 import { useColors, useResolvedTheme } from '../../theme/colors';
 
 // The white mark disappears on the light palette, so pick per theme.
@@ -80,20 +80,20 @@ function makeStyles(c: ThemePalette) {
       flex: 1,
       alignItems: 'center',
       justifyContent: 'center',
-      paddingHorizontal: spacing.xxl,
+      paddingHorizontal: spacing.lg,
       gap: spacing.xs,
     },
     avatar: {
-      width: 60,
-      height: 60,
+      width: componentSizes.avatarLg,
+      height: componentSizes.avatarLg,
       borderRadius: radius.full,
       backgroundColor: c.primary,
       alignItems: 'center',
       justifyContent: 'center',
       marginBottom: spacing.md,
     },
-    avatarText: { ...typography.h2, color: c.primaryForeground },
-    logo: { width: 60, height: 60, marginBottom: spacing.md },
+    avatarText: { ...typography.h3, color: c.primaryForeground },
+    logo: { width: componentSizes.avatarLg, height: componentSizes.avatarLg, marginBottom: spacing.md },
     email: { ...typography.caption, color: c.textMuted },
     title: { ...typography.h2, color: c.text, textAlign: 'center' },
     detail: { ...typography.body, color: c.textSecondary, textAlign: 'center' },

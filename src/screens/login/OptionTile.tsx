@@ -7,7 +7,7 @@ import { useColors } from '../../theme/colors';
 interface OptionTileProps {
   title: string;
   description?: string;
-  /** Receives the colour the tile's text renders in. */
+  /** Receives the colour the tile's icon renders in. */
   renderIcon: (color: string, size: number) => React.ReactNode;
   onPress: () => void;
   emphasis?: 'primary' | 'default';
@@ -17,7 +17,8 @@ interface OptionTileProps {
 /**
  * A full-width choice on the sign-in screen: icon, what it does, and what it
  * costs you. Used instead of a stack of buttons so each route can say enough
- * to be picked without trial and error.
+ * to be picked without trial and error. Emphasis follows the settings-row
+ * convention — a tinted icon chip, not a solid card.
  */
 export default function OptionTile({
   title,
@@ -30,7 +31,7 @@ export default function OptionTile({
   const c = useColors();
   const styles = React.useMemo(() => makeStyles(c), [c]);
   const isPrimary = emphasis === 'primary';
-  const contentColor = isPrimary ? c.primaryForeground : c.text;
+  const iconColor = isPrimary ? c.primary : c.textSecondary;
 
   return (
     <Pressable
@@ -40,27 +41,16 @@ export default function OptionTile({
       accessibilityLabel={description ? `${title}. ${description}` : title}
       style={({ pressed }) => [
         styles.tile,
-        isPrimary ? styles.tilePrimary : styles.tileDefault,
-        pressed && !disabled && (isPrimary ? styles.pressedPrimary : styles.pressedDefault),
+        pressed && !disabled && styles.pressed,
         disabled && styles.disabled,
       ]}
     >
-      <View style={styles.icon}>{renderIcon(contentColor, 22)}</View>
+      <View style={styles.icon}>{renderIcon(iconColor, 20)}</View>
       <View style={styles.text}>
-        <Text style={[styles.title, { color: contentColor }]}>{title}</Text>
-        {description ? (
-          <Text
-            style={[
-              styles.description,
-              { color: isPrimary ? c.primaryForeground : c.textSecondary },
-              isPrimary && styles.descriptionPrimary,
-            ]}
-          >
-            {description}
-          </Text>
-        ) : null}
+        <Text style={styles.title}>{title}</Text>
+        {description ? <Text style={styles.description}>{description}</Text> : null}
       </View>
-      <ChevronRight size={18} color={contentColor} style={styles.chevron} />
+      <ChevronRight size={18} color={c.textMuted} />
     </Pressable>
   );
 }
@@ -71,21 +61,18 @@ function makeStyles(c: ThemePalette) {
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
+      backgroundColor: c.card,
       borderRadius: radius.lg,
-      paddingHorizontal: spacing.lg,
-      paddingVertical: spacing.lg,
       borderWidth: 1,
+      borderColor: c.border,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.md,
     },
-    tileDefault: { backgroundColor: c.surface, borderColor: c.border },
-    tilePrimary: { backgroundColor: c.primary, borderColor: c.primary },
-    pressedDefault: { backgroundColor: c.surfaceHover },
-    pressedPrimary: { backgroundColor: c.primaryDark },
+    pressed: { backgroundColor: c.surfaceHover },
     disabled: { opacity: 0.5 },
-    icon: { width: 22, alignItems: 'center' },
+    icon: { width: 24, alignItems: 'center' },
     text: { flex: 1, gap: 2 },
-    title: { ...typography.baseMedium },
-    description: { ...typography.caption },
-    descriptionPrimary: { opacity: 0.8 },
-    chevron: { opacity: 0.5 },
+    title: { ...typography.bodyMedium, color: c.text },
+    description: { ...typography.caption, color: c.mutedForeground },
   });
 }

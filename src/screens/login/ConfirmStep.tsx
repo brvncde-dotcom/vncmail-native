@@ -47,30 +47,30 @@ export default function ConfirmStep({
 
       <View style={styles.card}>
         <View style={styles.cardIcon}>
-          <Globe size={19} color={c.primary} />
+          <Globe size={20} color={c.primary} />
         </View>
         <View style={styles.cardText}>
           <Text style={styles.cardTitle} numberOfLines={1}>
             {hostOf(serverUrl)}
           </Text>
-          <View style={styles.cardMetaRow}>
-            <View style={styles.dot} />
-            <Text style={styles.cardMeta}>
-              {serverUrl.startsWith('https://') ? 'JMAP · secure connection' : 'JMAP · unencrypted connection'}
-            </Text>
-          </View>
+          {!serverUrl.startsWith('https://') ? (
+            <View style={styles.cardMetaRow}>
+              <View style={styles.dot} />
+              <Text style={styles.cardMeta}>Unencrypted connection</Text>
+            </View>
+          ) : null}
         </View>
       </View>
 
       <LoginNotice
         tone="info"
         title="Your password stays with your provider"
-        detail="You'll type it on their page, not into this app. Bulwark keeps a token it can revoke."
+        detail="You'll type it on their page. Bulwark only stores a sign-in token, which you can revoke at any time."
       />
 
       {notice ? <LoginNotice title={notice.title} detail={notice.detail} /> : null}
 
-      <Button variant="default" size="lg" onPress={onContinue}>
+      <Button variant="default" size="md" onPress={onContinue}>
         Continue
       </Button>
 
@@ -99,22 +99,15 @@ function makeStyles(c: ThemePalette) {
       gap: spacing.md,
       borderWidth: 1,
       borderColor: c.border,
-      backgroundColor: c.surface,
+      backgroundColor: c.card,
       borderRadius: radius.lg,
-      padding: spacing.lg,
+      padding: spacing.md,
     },
-    cardIcon: {
-      width: 38,
-      height: 38,
-      borderRadius: radius.md,
-      backgroundColor: c.primaryBg,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
+    cardIcon: { width: 24, alignItems: 'center' },
     cardText: { flex: 1, gap: 2 },
-    cardTitle: { ...typography.baseMedium, color: c.text },
+    cardTitle: { ...typography.bodyMedium, color: c.text },
     cardMetaRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
-    dot: { width: 5, height: 5, borderRadius: radius.full, backgroundColor: c.success },
+    dot: { width: 5, height: 5, borderRadius: radius.full, backgroundColor: c.warning },
     cardMeta: { ...typography.caption, color: c.textSecondary },
 
     links: { alignItems: 'center', gap: spacing.md, paddingVertical: spacing.xs },

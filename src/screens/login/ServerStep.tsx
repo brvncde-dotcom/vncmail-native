@@ -35,7 +35,7 @@ export default function ServerStep({
   return (
     <View style={styles.root}>
       <View style={styles.heading}>
-        <Text style={styles.title}>Where does your mail live?</Text>
+        <Text style={styles.title}>What&apos;s your server address?</Text>
         <Text style={styles.subtitle}>
           {failedDomain
             ? `We couldn't find a server for ${failedDomain}. If you self-host, the address is the one you use for webmail.`
@@ -61,14 +61,14 @@ export default function ServerStep({
 
       {notice ? <LoginNotice title={notice.title} detail={notice.detail} /> : null}
 
-      <Button variant="default" size="lg" onPress={onSubmit}>
+      <Button variant="default" size="md" onPress={onSubmit}>
         Continue
       </Button>
 
       <Pressable onPress={onScan} hitSlop={8} style={styles.scanRow}>
         <QrCode size={15} color={c.textMuted} />
         <Text style={styles.scanText}>
-          Not sure? Scan a sign-in code instead — it carries the address with it.
+          If you&apos;re not sure, scan a sign-in code instead. It carries the server address.
         </Text>
       </Pressable>
     </View>

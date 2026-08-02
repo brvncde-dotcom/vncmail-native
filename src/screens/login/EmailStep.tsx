@@ -39,7 +39,7 @@ export default function EmailStep({
           {isAddMode ? "What's the other address?" : "What's your email address?"}
         </Text>
         <Text style={styles.subtitle}>
-          That&apos;s usually all we need — we&apos;ll look up the mail server for you.
+          That&apos;s usually all we need to find your mail server.
         </Text>
       </View>
 
@@ -59,11 +59,11 @@ export default function EmailStep({
         leftIcon={<Mail size={17} color={c.textMuted} />}
       />
 
-      <Text style={styles.hint}>Works with Bulwark, Stalwart, and any JMAP mail server.</Text>
+      <Text style={styles.hint}>Works with Stalwart and any other JMAP mail server.</Text>
 
       {notice ? <LoginNotice title={notice.title} detail={notice.detail} /> : null}
 
-      <Button variant="default" size="lg" onPress={onSubmit} loading={isSearching}>
+      <Button variant="default" size="md" onPress={onSubmit} loading={isSearching}>
         {isSearching ? 'Looking up your server…' : 'Continue'}
       </Button>
 

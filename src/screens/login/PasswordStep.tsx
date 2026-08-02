@@ -81,7 +81,7 @@ export default function PasswordStep({
 
       {notice ? <LoginNotice title={notice.title} detail={notice.detail} /> : null}
 
-      <Button variant="default" size="lg" onPress={onSubmit}>
+      <Button variant="default" size="md" onPress={onSubmit}>
         Sign in
       </Button>
     </View>

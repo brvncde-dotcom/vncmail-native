@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions, type BarcodeScanningResult } from 'expo-camera';
 import { X } from 'lucide-react-native';
 import { spacing, radius, typography, type ThemePalette } from '../theme/tokens';
-import { useColors } from '../theme/colors';
+import { useColors, useResolvedTheme } from '../theme/colors';
 import Button from './Button';
 
 interface QrScanModalProps {
@@ -17,7 +17,8 @@ interface QrScanModalProps {
 
 export function QrScanModal({ visible, onClose, onScanned }: QrScanModalProps) {
   const c = useColors();
-  const styles = React.useMemo(() => makeStyles(c), [c]);
+  const theme = useResolvedTheme();
+  const styles = React.useMemo(() => makeStyles(c, theme), [c, theme]);
   const [permission, requestPermission] = useCameraPermissions();
   // Guards against the camera firing onBarcodeScanned dozens of times for the
   // same code before the modal tears down.
@@ -48,18 +49,17 @@ export function QrScanModal({ visible, onClose, onScanned }: QrScanModalProps) {
           />
         ) : null}
 
-        <SafeAreaView style={styles.overlay}>
-          <View style={styles.header}>
-            <Pressable onPress={onClose} hitSlop={10} style={styles.closeButton}>
-              <X size={24} color="#ffffff" />
-            </Pressable>
-            <Text style={styles.title}>Sign-in code</Text>
-            <View style={styles.closeButton} />
-          </View>
-
-          {permission?.granted ? (
-            <View style={styles.frameWrap}>
+        {permission?.granted ? (
+          // Dims everything except the scan square. Four scrim regions leave a
+          // transparent hole so the camera shows through only inside the frame.
+          <View style={StyleSheet.absoluteFill} pointerEvents="none">
+            <View style={styles.scrim} />
+            <View style={styles.scrimCenterRow}>
+              <View style={styles.scrimSide} />
               <View style={styles.frame} />
+              <View style={styles.scrimSide} />
+            </View>
+            <View style={[styles.scrim, styles.scrimBottom]}>
               <View style={styles.hintWrap}>
                 <Text style={styles.hintTitle}>Open Bulwark on your computer</Text>
                 <Text style={styles.hint}>
@@ -67,7 +67,19 @@ export function QrScanModal({ visible, onClose, onScanned }: QrScanModalProps) {
                 </Text>
               </View>
             </View>
-          ) : (
+          </View>
+        ) : null}
+
+        <SafeAreaView style={styles.overlay}>
+          <View style={styles.header}>
+            <Pressable onPress={onClose} hitSlop={10} style={styles.closeButton}>
+              <X size={24} color={c.text} />
+            </Pressable>
+            <Text style={styles.title}>Sign-in code</Text>
+            <View style={styles.closeButton} />
+          </View>
+
+          {!permission?.granted ? (
             <View style={styles.permissionWrap}>
               <Text style={styles.permissionText}>
                 {permission && !permission.canAskAgain
@@ -78,14 +90,15 @@ export function QrScanModal({ visible, onClose, onScanned }: QrScanModalProps) {
                 Allow camera access
               </Button>
             </View>
-          )}
+          ) : null}
         </SafeAreaView>
       </View>
     </Modal>
   );
 }
 
-function makeStyles(c: ThemePalette) {
+function makeStyles(c: ThemePalette, theme: 'light' | 'dark') {
+  const scrimColor = theme === 'light' ? 'rgba(248,250,252,0.72)' : 'rgba(0,0,0,0.6)';
   return StyleSheet.create({
     container: { flex: 1, backgroundColor: '#000000' },
     overlay: { flex: 1, justifyContent: 'flex-start' },
@@ -98,21 +111,24 @@ function makeStyles(c: ThemePalette) {
       paddingBottom: spacing.md,
     },
     closeButton: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
-    title: { ...typography.h3, color: '#ffffff' },
-    frameWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: spacing.lg },
+    title: { ...typography.h3, color: c.text },
+    scrim: { flex: 1, backgroundColor: scrimColor },
+    scrimCenterRow: { flexDirection: 'row', height: 240 },
+    scrimSide: { flex: 1, backgroundColor: scrimColor },
+    scrimBottom: { alignItems: 'center', paddingTop: spacing.xl },
     frame: {
       width: 240,
       height: 240,
       borderWidth: 3,
-      borderColor: '#ffffff',
+      borderColor: c.text,
       borderRadius: radius.lg,
       backgroundColor: 'transparent',
     },
     hintWrap: { alignItems: 'center', gap: spacing.xs, paddingHorizontal: spacing.xxl },
-    hintTitle: { ...typography.bodySemibold, color: '#ffffff', textAlign: 'center' },
+    hintTitle: { ...typography.bodySemibold, color: c.text, textAlign: 'center' },
     hint: {
       ...typography.caption,
-      color: 'rgba(255,255,255,0.8)',
+      color: c.textSecondary,
       textAlign: 'center',
     },
     permissionWrap: {
