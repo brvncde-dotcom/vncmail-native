@@ -8,6 +8,8 @@ import LoginNotice from './LoginNotice';
 
 interface ConfirmStepProps {
   serverUrl: string;
+  /** False when the user supplied the address — we didn't find anything. */
+  discovered: boolean;
   onContinue: () => void;
   onChangeServer: () => void;
   onUsePassword: () => void;
@@ -25,6 +27,7 @@ function hostOf(url: string): string {
  */
 export default function ConfirmStep({
   serverUrl,
+  discovered,
   onContinue,
   onChangeServer,
   onUsePassword,
@@ -36,7 +39,9 @@ export default function ConfirmStep({
   return (
     <View style={styles.root}>
       <View style={styles.heading}>
-        <Text style={styles.title}>Found your mail server</Text>
+        <Text style={styles.title}>
+          {discovered ? 'Found your mail server' : 'Check this looks right'}
+        </Text>
         <Text style={styles.subtitle}>Next you&apos;ll sign in on your provider&apos;s own page.</Text>
       </View>
 

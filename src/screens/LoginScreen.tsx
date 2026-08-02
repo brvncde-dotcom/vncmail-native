@@ -51,6 +51,9 @@ export default function LoginScreen({ onLogin, isAddMode = false, onCancel }: Lo
   const [email, setEmail] = React.useState('');
   const [serverInput, setServerInput] = React.useState('');
   const [serverUrl, setServerUrl] = React.useState('');
+  // Drives the confirm step's heading: we only claim to have "found" a server
+  // when discovery actually found one.
+  const [serverDiscovered, setServerDiscovered] = React.useState(false);
   const [password, setPassword] = React.useState('');
   const [failedDomain, setFailedDomain] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState<LoginErrorCopy | null>(null);
@@ -158,6 +161,7 @@ export default function LoginScreen({ onLogin, isAddMode = false, onCancel }: Lo
       if (found) {
         setServerUrl(found);
         setServerInput(found);
+        setServerDiscovered(true);
         goTo('confirm');
       } else {
         setFailedDomain(emailDomain(value));
@@ -179,6 +183,7 @@ export default function LoginScreen({ onLogin, isAddMode = false, onCancel }: Lo
       return;
     }
     setServerUrl(normalized);
+    setServerDiscovered(false);
     goTo('confirm');
   }, [goTo, serverInput]);
 
@@ -279,6 +284,7 @@ export default function LoginScreen({ onLogin, isAddMode = false, onCancel }: Lo
               if (!knownServerUrl) return;
               setServerUrl(knownServerUrl);
               setServerInput(knownServerUrl);
+              setServerDiscovered(false);
               goTo('confirm');
             }}
             onManualSetup={() => {
@@ -334,6 +340,7 @@ export default function LoginScreen({ onLogin, isAddMode = false, onCancel }: Lo
         {step === 'confirm' ? (
           <ConfirmStep
             serverUrl={serverUrl}
+            discovered={serverDiscovered}
             onContinue={() => void runHandoff(serverUrl)}
             onChangeServer={() => {
               setFailedDomain(null);
