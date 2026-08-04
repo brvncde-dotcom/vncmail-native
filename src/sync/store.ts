@@ -2,7 +2,7 @@
 // about persistence: no SQL, no expo-sqlite, no AsyncStorage, no key strings
 // outside `store-*.ts`.
 
-import type { EmailAddress } from '../api/types';
+import type { EmailAddress, MailboxRights } from '../api/types';
 import type {
   ChangesState,
   CursorType,
@@ -49,7 +49,7 @@ export interface MailboxRow extends MailboxCounts {
   parentId: string | null;
   role: string | null;
   sortOrder: number | null;
-  myRights: Record<string, boolean> | null;
+  myRights: MailboxRights | null;
   isSubscribed: boolean;
 }
 
@@ -134,6 +134,19 @@ export interface CoverageState {
   sweepFloor?: string;
   /** Set when a retention widen arrived mid-reconcile and must be applied after the sweep. */
   deferredTargetFrom?: string;
+  /**
+   * The `cachedAt` stamp a reconcile's enumeration writes onto every envelope it
+   * re-sees, pinned when the reconcile starts.
+   *
+   * This is how §7.6 step 3's "recording seen ids" is made durable ACROSS cycles
+   * without a seen-ids table: the enumeration re-upserts each surviving envelope,
+   * which refreshes its `cached_at`, so step 4's sweep is
+   * `receivedAt >= sweepFloor AND cached_at < reconcileStampedAt`. A record the
+   * enumeration never reached keeps its older stamp and is swept; a record the LIVE
+   * delta path creates mid-reconcile (S9) gets `Date.now() >= stamp` and survives,
+   * which is exactly right.
+   */
+  reconcileStampedAt?: number;
   /** Durable trace of any tie-cluster skip taken by §6.1's last-resort rung. */
   gapMarkers?: Array<{ from: string; to: string; reason: 'tie-cluster-skip'; at: number }>;
   phase: 'never-run' | 'scanning' | 'reconciling' | 'complete';
@@ -307,6 +320,11 @@ export interface EnvelopeQuery {
   mailboxId?: string;
   receivedBefore?: string;
   receivedAfter?: string;
+  /**
+   * Exclusive upper bound on `cachedAt` — the reconcile sweep's "not re-seen by
+   * this enumeration" predicate (§7.6 step 4, see `CoverageState.reconcileStampedAt`).
+   */
+  cachedBefore?: number;
   /** `false` is job C2's driver (S9): covered envelopes with no body yet. */
   hasBody?: boolean;
   limit: number;

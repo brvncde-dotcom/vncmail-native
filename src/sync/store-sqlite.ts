@@ -7,6 +7,7 @@
 // `queryEnvelopes` is an index seek over `email_mailbox` rather than a scan of
 // every cached body.
 
+import type { MailboxRights } from '../api/types';
 import { Mutex } from './mutex';
 import type { SyncRegistry } from './registry';
 import { syncRegistry } from './registry';
@@ -65,6 +66,23 @@ function bool(v: unknown): boolean {
   return v === 1 || v === true;
 }
 
+/**
+ * For a row that MUST parse: there is no sensible fallback for a cursor or a
+ * coverage row, and substituting one would be exactly the "fall back to empty
+ * cursors" behaviour I13 forbids — it would leave a store full of unverified
+ * pre-existing records that no sweep ever visits (F43).
+ */
+function jsonRequired<T>(raw: unknown, key: string): T {
+  if (raw === null || raw === undefined) {
+    throw new CorruptStateError(`missing value for ${key}`, key);
+  }
+  try {
+    return JSON.parse(String(raw)) as T;
+  } catch (cause) {
+    throw new CorruptStateError(`unparseable JSON in ${key}`, key, cause);
+  }
+}
+
 function json<T>(raw: unknown, fallback: T, key: string): T {
   if (raw === null || raw === undefined) return fallback;
   try {
@@ -105,7 +123,7 @@ function toMailboxRow(r: MailboxSqlRow): MailboxRow {
     unreadEmails: r.unread_emails,
     totalThreads: r.total_threads,
     unreadThreads: r.unread_threads,
-    myRights: json<Record<string, boolean> | null>(r.my_rights, null, 'mailbox.my_rights'),
+    myRights: json<MailboxRights | null>(r.my_rights, null, 'mailbox.my_rights'),
     isSubscribed: bool(r.is_subscribed),
   };
 }
@@ -651,9 +669,9 @@ class SqliteStore implements SyncStore {
       if (row.k === FLAGS_KEY) {
         flags = json<StoredFlags>(row.v, defaultFlags(), row.k);
       } else if (row.k.startsWith('cursor:')) {
-        cursors.push(json<SyncCursor>(row.v, null as never, row.k));
+        cursors.push(jsonRequired<SyncCursor>(row.v, row.k));
       } else if (row.k.startsWith('coverage:')) {
-        coverage.push(json<CoverageState>(row.v, null as never, row.k));
+        coverage.push(jsonRequired<CoverageState>(row.v, row.k));
       }
     }
     return { ...flags, cursors, coverage };
@@ -804,6 +822,10 @@ class SqliteStore implements SyncStore {
     if (q.receivedAfter !== undefined) {
       sql += ' AND e.received_at >= ?';
       params.push(q.receivedAfter);
+    }
+    if (q.cachedBefore !== undefined) {
+      sql += ' AND e.cached_at < ?';
+      params.push(q.cachedBefore);
     }
     if (q.hasBody !== undefined) {
       sql += ' AND e.has_body = ?';

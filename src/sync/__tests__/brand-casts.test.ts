@@ -103,6 +103,29 @@ describe('branded cursor states cannot be cast into existence (§6.3, §13)', ()
     expect(offenders).toEqual([]);
   });
 
+  it('src/sync contains no escape-hatch casts at all', () => {
+    // Added after the Stage C build caught the author using `as never` to paper
+    // over a `ChangesPage` type mismatch — which silently defeated the brand while
+    // the `as ChangesState` assertion above stayed green. A cast that launders a
+    // type is the same hazard whatever it is spelled, so the ban is total inside
+    // the engine. (Type PREDICATES like `x is Foo` are unaffected.)
+    const offenders: string[] = [];
+    for (const file of files) {
+      if (!file.includes(join('src', 'sync'))) continue;
+      if (file.includes('__tests__')) continue;
+      if (file.endsWith(join('sync', 'states.ts'))) continue;
+      for (const { line, number } of codeLines(readFileSync(file, 'utf8'))) {
+        // A LONE `as unknown` is a narrowing — strictly safer than the `any`
+        // JSON.parse hands back — so it is allowed. `as unknown as X` is the
+        // double cast that launders one type into another, and that is banned.
+        if (/\bas\s+(never|any)\b/.test(line) || /\bas\s+unknown\s+as\b/.test(line)) {
+          offenders.push(`${file}:${number}: ${line.trim()}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
   it('the minting functions are only called from the API layer and tests (§12.1)', () => {
     // The wrappers in src/api/email.ts are the legitimate mint sites: they are
     // the boundary where a JMAP response becomes a typed value. Anywhere else is

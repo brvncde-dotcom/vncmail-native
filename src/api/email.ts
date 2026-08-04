@@ -203,14 +203,17 @@ export async function getMailboxChanges(
  */
 export async function getMailboxProperties(
   ids: string[],
-  properties: string[],
+  properties: string[] | undefined,
   accountIdOverride?: string,
 ): Promise<Mailbox[]> {
   if (ids.length === 0) return [];
   const accountId = accountIdOverride ?? jmapClient.accountId;
-  const res = await jmapClient.request([
-    ['Mailbox/get', { accountId, ids, properties }, '0'],
-  ]);
+  const args: Record<string, unknown> = { accountId, ids };
+  // Omitting `properties` means "all properties" (RFC 8620 §5.1). Passing an
+  // empty array would mean "none", which is not what a caller wanting the full
+  // object intends.
+  if (properties !== undefined) args.properties = properties;
+  const res = await jmapClient.request([['Mailbox/get', args, '0']]);
   return ((res.methodResponses[0][1].list as Mailbox[]) ?? []);
 }
 
