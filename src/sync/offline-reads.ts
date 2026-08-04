@@ -60,9 +60,10 @@ async function openIfMaterialised(
   factory: SyncStoreFactory,
   accountId: LocalAccountId,
 ): Promise<SyncStore | null> {
-  // §9.5: never materialise a store on a READ. `open()` itself creates nothing, but
-  // checking first keeps the intent explicit and skips the work entirely for an account
-  // that has never synced.
+  // An OPTIMISATION, not the guarantee. §9.5's actual guarantee is that `open()` creates
+  // nothing and only a WRITE materialises — proven in the store contract tests, and true
+  // whether or not this check is here. Removing it changes no observable behaviour, only
+  // the work done for an account that has never synced.
   if (!(await factory.isMaterialised(accountId))) return null;
   return factory.open(accountId);
 }

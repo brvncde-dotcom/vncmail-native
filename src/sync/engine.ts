@@ -109,6 +109,12 @@ export interface EngineDeps {
   sleep?(ms: number): Promise<void>;
   log?(level: 'warn' | 'error' | 'info', message: string): void;
   onReport?(report: CycleReport): void;
+  /**
+   * Called as each phase BEGINS, so a UI can show live progress rather than only the
+   * end-of-cycle report. Purely an observer — §10.5 requires the engine to work with no
+   * UI attached, so this must never affect control flow.
+   */
+  onPhase?(accountId: LocalAccountId, phase: string): void;
 }
 
 interface InFlight {
@@ -218,6 +224,15 @@ export class SyncEngine {
     const budget = BUDGETS[mode];
     const deadlineAt = startedAt + budget.wallClockMs;
     const phases: string[] = [];
+    const phase = (name: string): void => {
+      phases.push(name);
+      try {
+        this.deps.onPhase?.(accountId, name);
+      } catch (err) {
+        // An observer must never be able to fail a cycle.
+        this.log('warn', `onPhase observer threw: ${String(err)}`);
+      }
+    };
     let retryAfterMs: number | undefined;
 
     const finish = (
@@ -342,7 +357,7 @@ export class SyncEngine {
 
       // ── Bootstrap, if this account has never run ──
       if (!coverage || coverage.phase === 'never-run') {
-        phases.push('bootstrap');
+        phase('bootstrap');
         const result = await bootstrap({
           ...commonCtx,
           envelopeFrom,
@@ -374,7 +389,7 @@ export class SyncEngine {
           record('partial', false);
           unfinishedWork = true;
         } else {
-          phases.push('reconcile-start');
+          phase('reconcile-start');
           record(started === 'failed' ? 'failed' : 'ok', started !== 'failed');
           state = await store.loadAccountState();
           coverage = state.coverage.find((c) => c.jmapAccountId === jmapAccountId);
@@ -436,7 +451,7 @@ export class SyncEngine {
         );
         if (!cursor) continue;
 
-        phases.push(`delta:${type}`);
+        phase(`delta:${type}`);
         cachedAtStamp = stampFor(coverage);
         const drainCtx = { ...drainCtxBase, cachedAtStamp, pageBudget: budget.pagesPerCursor };
         const drain =
@@ -486,7 +501,7 @@ export class SyncEngine {
         }
 
         if (coverage && (coverage.phase === 'scanning' || coverage.phase === 'reconciling')) {
-          phases.push(`coverage:${coverage.phase}`);
+          phase(`coverage:${coverage.phase}`);
           // Reconcile: stamp EXACTLY the pin, so `cached_at < pin` means "not re-seen
           // by this enumeration" and a re-seen record (cached_at === pin) survives.
           const stampedAt =
@@ -521,7 +536,7 @@ export class SyncEngine {
                 // §7.6 step 4 — GATED on step 3 completing, and only against the
                 // PINNED sweepFloor (S2). This is the branch that made F38 a
                 // permanent-data-loss bug before revision 2.
-                phases.push('reconcile-sweep');
+                phase('reconcile-sweep');
                 const swept = await sweep(coverageCtx, fresh);
                 this.log(
                   'info',
@@ -548,7 +563,7 @@ export class SyncEngine {
                 'from a suppressed clock anomaly, not from a retention-setting change (F44)',
             );
           } else {
-            phases.push('retention:narrow');
+            phase('retention:narrow');
             await this.evictEnvelopesBelow(store, jmapAccountId, adjustment.evictBelow);
             madeProgress = true;
           }
@@ -583,13 +598,13 @@ export class SyncEngine {
           );
         }
 
-        phases.push('bodies:drain');
+        phase('bodies:drain');
         const drained = await drainBodyQueue(bodiesCtx);
         record(drained.error ? 'failed' : 'ok', drained.madeProgress, drained.error);
 
         // C2 runs even when C1 found nothing: its whole job is noticing envelopes
         // that never had a body enqueued (a widened body window, or a give-up).
-        phases.push('bodies:backfill');
+        phase('bodies:backfill');
         const backfilled = await backfillBodies({
           ...bodiesCtx,
           itemBudget: Math.max(0, budget.bodyItems - drained.fetched),
@@ -597,7 +612,7 @@ export class SyncEngine {
         record(backfilled.error ? 'failed' : 'ok', backfilled.madeProgress, backfilled.error);
         if (backfilled.enqueued > 0) unfinishedWork = true;
 
-        phases.push('bodies:retention');
+        phase('bodies:retention');
         const evicted = await enforceBodyRetention(bodiesCtx);
         record(evicted.error ? 'failed' : 'ok', evicted.madeProgress, evicted.error);
       }

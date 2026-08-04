@@ -6,6 +6,8 @@ import { View, Text, StyleSheet, Pressable } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CloudDownload, X } from 'lucide-react-native';
 import { useOfflineCacheStore } from '../stores/offline-cache-store';
+import { useSettingsStore } from '../stores/settings-store';
+import { useSyncStatusStore } from '../stores/sync-status-store';
 import { useUpdatesStore } from '../stores/updates-store';
 import { formatBytes } from '../lib/offline-sync';
 import { spacing, radius, typography, type ThemePalette } from '../theme/tokens';
@@ -15,9 +17,52 @@ export function OfflineCacheBanner(): React.ReactElement | null {
   const c = useColors();
   const styles = React.useMemo(() => makeStyles(c), [c]);
   const insets = useSafeAreaInsets();
-  const sync = useOfflineCacheStore((s) => s.sync);
-  const requestAbort = useOfflineCacheStore((s) => s.requestAbort);
-  const resetSync = useOfflineCacheStore((s) => s.resetSync);
+  // Two engines, one banner. The v1 store's `sync` and the v2 engine's status are
+  // different shapes, so the flag decides which one this bar is reporting on — showing
+  // stale v1 state while v2 is doing the work would be worse than showing nothing.
+  const engineV2 = useSettingsStore((s) => s.offlineSyncEngineV2);
+  const v1Sync = useOfflineCacheStore((s) => s.sync);
+  const v1Abort = useOfflineCacheStore((s) => s.requestAbort);
+  const v1Reset = useOfflineCacheStore((s) => s.resetSync);
+  const v2 = useSyncStatusStore((s) => ({
+    phase: s.phase,
+    message: s.message,
+    unfinished: s.unfinished,
+  }));
+  const v2Reset = useSyncStatusStore((s) => s.reset);
+
+  // §12.3 maps the engine's new phases onto the five this bar already renders. The engine
+  // reports no item counts — it is cursor-driven, not "N of M" — so v2 shows an
+  // indeterminate bar with a phase label rather than a fake percentage.
+  const sync = React.useMemo(() => {
+    if (!engineV2) return v1Sync;
+    const map: Record<string, { phase: string; label?: string }> = {
+      idle: { phase: 'idle' },
+      bootstrapping: { phase: 'scanning', label: 'Downloading your mail history…' },
+      coverage: { phase: 'scanning', label: 'Filling in older messages…' },
+      resyncing: { phase: 'scanning', label: 'Re-syncing offline mail…' },
+      delta: { phase: 'fetching', label: 'Checking for changes…' },
+      bodies: { phase: 'fetching', label: 'Downloading message bodies…' },
+      partial: { phase: 'fetching', label: 'Paused — will continue shortly' },
+      done: { phase: 'done' },
+      error: { phase: 'error' },
+    };
+    const mapped = map[v2.phase] ?? { phase: 'idle' };
+    return {
+      phase: mapped.phase as typeof v1Sync.phase,
+      total: 0,
+      completed: 0,
+      fetched: 0,
+      bytes: 0,
+      message: v2.phase === 'error' ? v2.message : mapped.label,
+    };
+  }, [engineV2, v1Sync, v2]);
+
+  // Cancelling a v2 cycle is an abort at the next page boundary; there is no destructive
+  // cancel to offer, and the engine resumes on its own via T9, so the bar only offers
+  // dismiss on v2.
+  const requestAbort = engineV2 ? () => undefined : v1Abort;
+  const resetSync = engineV2 ? v2Reset : v1Reset;
   // When UpdateBanner is stacked above us it already absorbs the status-bar
   // inset, so we only add it when we're the topmost banner.
   const cachedLatest = useUpdatesStore((s) => s.cachedLatest);
@@ -53,17 +98,21 @@ export function OfflineCacheBanner(): React.ReactElement | null {
   switch (sync.phase) {
     case 'scanning':
       title = 'Syncing offline mail';
-      subtitle = 'Scanning recent messages…';
+      subtitle = sync.message ?? 'Scanning recent messages…';
       break;
     case 'fetching':
       title = 'Syncing offline mail';
-      subtitle = `${sync.completed}/${sync.total} • ${formatBytes(sync.bytes)}`;
+      subtitle = engineV2
+        ? (sync.message ?? 'Checking for changes…')
+        : `${sync.completed}/${sync.total} • ${formatBytes(sync.bytes)}`;
       break;
     case 'done':
       title = 'Offline mail ready';
-      subtitle = sync.fetched > 0
-        ? `${sync.fetched} new message${sync.fetched === 1 ? '' : 's'} cached • ${formatBytes(sync.bytes)}`
-        : 'Already up to date';
+      subtitle = engineV2
+        ? 'Up to date'
+        : sync.fetched > 0
+          ? `${sync.fetched} new message${sync.fetched === 1 ? '' : 's'} cached • ${formatBytes(sync.bytes)}`
+          : 'Already up to date';
       break;
     case 'cancelled':
       title = 'Sync cancelled';
@@ -77,7 +126,7 @@ export function OfflineCacheBanner(): React.ReactElement | null {
       return null;
   }
 
-  const showCancel = sync.phase === 'scanning' || sync.phase === 'fetching';
+  const showCancel = !engineV2 && (sync.phase === 'scanning' || sync.phase === 'fetching');
   const showDismiss = sync.phase === 'done' || sync.phase === 'cancelled' || sync.phase === 'error';
   const isError = sync.phase === 'error';
 
@@ -89,7 +138,9 @@ export function OfflineCacheBanner(): React.ReactElement | null {
         {!!subtitle && <Text style={styles.subtitle}>{subtitle}</Text>}
         {(sync.phase === 'fetching' || sync.phase === 'scanning') && (
           <View style={styles.progressTrack}>
-            <View style={[styles.progressFill, { width: `${pct}%` }]} />
+            {/* v2 is cursor-driven, so there is no honest denominator — a full-width
+                track reads as "working" without inventing a percentage. */}
+            <View style={[styles.progressFill, { width: engineV2 ? '100%' : `${pct}%` }]} />
           </View>
         )}
       </View>
