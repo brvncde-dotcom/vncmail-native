@@ -24,6 +24,8 @@ import {
   deleteEmail,
   searchEmails,
   sendEmail,
+  getMailboxChanges,
+  getEmailChanges,
 } from '../email';
 
 const mockRequest = jmapClient.request as ReturnType<typeof vi.fn>;
@@ -404,6 +406,50 @@ describe('email operations', () => {
       const emailCreate = mockRequest.mock.calls[0][0][0][1].create.draft;
       expect(emailCreate['header:In-Reply-To:asText']).toBe('<msg-1@example.com>');
       expect(emailCreate['header:References:asText']).toBe('<msg-0@example.com> <msg-1@example.com>');
+    });
+  });
+
+  describe('getMailboxChanges', () => {
+    it('returns null on cannotCalculateChanges so callers fall back to a full refetch', async () => {
+      mockRequest.mockResolvedValue({
+        methodResponses: [['error', { type: 'cannotCalculateChanges' }, '0']],
+      });
+
+      expect(await getMailboxChanges('state-1')).toBeNull();
+    });
+
+    it('throws on any other method-level error instead of collapsing to null', async () => {
+      mockRequest.mockResolvedValue({
+        methodResponses: [['error', { type: 'serverUnavailable', description: 'down' }, '0']],
+      });
+
+      await expect(getMailboxChanges('state-1')).rejects.toThrow(/serverUnavailable/);
+    });
+  });
+
+  describe('getEmailChanges', () => {
+    it('returns null on cannotCalculateChanges so callers fall back to a full resync', async () => {
+      mockRequest.mockResolvedValue({
+        methodResponses: [['error', { type: 'cannotCalculateChanges' }, '0']],
+      });
+
+      expect(await getEmailChanges('state-1')).toBeNull();
+    });
+
+    it('throws on tooManyRequests instead of collapsing to null', async () => {
+      mockRequest.mockResolvedValue({
+        methodResponses: [['error', { type: 'tooManyRequests' }, '0']],
+      });
+
+      await expect(getEmailChanges('state-1')).rejects.toThrow(/tooManyRequests/);
+    });
+
+    it('throws on invalidArguments instead of collapsing to null', async () => {
+      mockRequest.mockResolvedValue({
+        methodResponses: [['error', { type: 'invalidArguments', description: 'bad state' }, '0']],
+      });
+
+      await expect(getEmailChanges('state-1')).rejects.toThrow(/invalidArguments/);
     });
   });
 });

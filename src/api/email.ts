@@ -131,8 +131,11 @@ export interface MailboxChangesResult {
   destroyed: string[];
 }
 
-// Returns null when the server can't compute the diff (typically
-// `cannotCalculateChanges`); callers should fall back to a full Mailbox/get.
+// Returns null only for `cannotCalculateChanges` — the one error type callers
+// should treat as "fall back to a full Mailbox/get". Any other method-level
+// error (serverUnavailable, tooManyRequests, invalidArguments, ...) throws so
+// it isn't mistaken for a state invalidation; callers already catch and
+// handle transient failures without discarding their sync cursor.
 export async function getMailboxChanges(
   sinceState: string,
   accountIdOverride?: string,
@@ -142,7 +145,12 @@ export async function getMailboxChanges(
     [['Mailbox/changes', { accountId, sinceState }, '0']],
   );
   const [name, body] = res.methodResponses[0];
-  if (name === 'error') return null;
+  if (name === 'error') {
+    if (body.type === 'cannotCalculateChanges') return null;
+    throw new Error(
+      `Mailbox/changes failed: ${(body.type as string) ?? 'unknown'}${body.description ? ` - ${body.description}` : ''}`,
+    );
+  }
   return {
     oldState: body.oldState as string,
     newState: body.newState as string,
@@ -352,8 +360,11 @@ export interface EmailChangesResult {
   destroyed: string[];
 }
 
-// Returns null when the server replies with `cannotCalculateChanges` or any
-// other error response; caller should treat that as "rebuild from scratch".
+// Returns null only for `cannotCalculateChanges` — the one error type callers
+// should treat as "rebuild from scratch". Any other method-level error
+// (serverUnavailable, tooManyRequests, invalidArguments, ...) throws so a
+// transient failure isn't mistaken for a state invalidation and doesn't
+// silently discard the caller's sync cursor.
 export async function getEmailChanges(
   sinceState: string,
   maxChanges?: number,
@@ -364,7 +375,12 @@ export async function getEmailChanges(
   if (maxChanges) args.maxChanges = maxChanges;
   const res = await jmapClient.request([['Email/changes', args, '0']]);
   const [name, body] = res.methodResponses[0];
-  if (name === 'error') return null;
+  if (name === 'error') {
+    if (body.type === 'cannotCalculateChanges') return null;
+    throw new Error(
+      `Email/changes failed: ${(body.type as string) ?? 'unknown'}${body.description ? ` - ${body.description}` : ''}`,
+    );
+  }
   return {
     oldState: body.oldState as string,
     newState: body.newState as string,
@@ -729,12 +745,15 @@ export async function searchEmails(
 }
 
 // Cross-mailbox query with an arbitrary JMAP filter (used by contact activity
-// to search "from OR to <addresses>" without picking a specific mailbox).
+// to search "from OR to <addresses>" without picking a specific mailbox, and
+// by the offline sync engine, which pins the account it started for via
+// `accountIdOverride` so a mid-run account switch can't redirect the query).
 export async function queryEmailsByFilter(
   filter: Record<string, unknown>,
   limit = 5,
+  accountIdOverride?: string,
 ): Promise<string[]> {
-  const accountId = jmapClient.accountId;
+  const accountId = accountIdOverride ?? jmapClient.accountId;
   const res = await jmapClient.request([
     ['Email/query', {
       accountId,
