@@ -133,7 +133,7 @@ export async function drainBodyQueue(ctx: BodiesContext): Promise<BodiesResult> 
 
   const writes: Array<{ key: RowKey; body: BodyRow }> = [];
   const dequeue: RowKey[] = [];
-  const giveUp: Array<{ key: RowKey; reason: 'attempts' | 'notFound'; lastError?: string }> = [];
+  const giveUp: Array<{ key: RowKey; reason: 'attempts' | 'notFound' | 'shed-by-cap'; lastError?: string }> = [];
   const retry: BodyQueueEntry[] = [];
 
   for (const entry of actionable) {
@@ -206,7 +206,7 @@ async function recordBodyFailures(
   out: BodiesResult,
 ): Promise<void> {
   const retry: BodyQueueEntry[] = [];
-  const giveUp: Array<{ key: RowKey; reason: 'attempts' | 'notFound'; lastError?: string }> = [];
+  const giveUp: Array<{ key: RowKey; reason: 'attempts' | 'notFound' | 'shed-by-cap'; lastError?: string }> = [];
   for (const entry of entries) {
     const attempts = entry.attempts + 1;
     if (attempts >= MAX_BODY_ATTEMPTS) {
@@ -273,26 +273,10 @@ export async function backfillBodies(ctx: BodiesContext): Promise<BodiesResult> 
   let headroom = ctx.maxBodyBytes - used;
   if (headroom <= 0) return out;
 
-  // THE FRONTIER. Headroom alone is not enough: the evictor sheds oldest-first, so
-  // anything older than the oldest body we currently keep is guaranteed to be the next
-  // thing evicted — enqueuing it is guaranteed waste, and C2 and the evictor would
-  // trade the same bytes back and forth forever.
-  //
-  // So when the cap is the binding constraint, the cap defines an EFFECTIVE body window
-  // narrower than the setting, and C2 works only inside it. That makes C2 monotone:
-  // it fills newest-first down to the frontier and then has nothing left to do.
-  let effectiveFrom = ctx.bodyFrom;
-  if (used > 0 && used >= ctx.maxBodyBytes * 0.9) {
-    const [oldestKept] = await ctx.store.listBodiesForEviction(1);
-    if (oldestKept && oldestKept.receivedAt > effectiveFrom) {
-      effectiveFrom = oldestKept.receivedAt;
-    }
-  }
-
   const candidates = await ctx.store.queryEnvelopes({
     jmapAccountId: ctx.jmapAccountId,
     hasBody: false,
-    receivedAfter: effectiveFrom,
+    receivedAfter: ctx.bodyFrom,
     limit: ctx.itemBudget,
   });
   if (candidates.length === 0) return out;
@@ -300,6 +284,14 @@ export async function backfillBodies(ctx: BodiesContext): Promise<BodiesResult> 
   // Rows with a durable terminal state are excluded here as well as by
   // `enqueueBodies`'s insert-or-ignore — belt and braces, and it keeps the projected
   // headroom honest.
+  //
+  // `shed-by-cap` is the one that makes this loop TERMINATE. A first attempt at this
+  // used a heuristic frontier (skip anything older than the oldest kept body once the
+  // store looked ~full) and it did not work: the evictor sheds down to the cap, which
+  // leaves headroom, so C2 refilled and the pair traded the same bytes back and forth
+  // with a real non-zero cap. A body shed for SPACE has to be durably marked, exactly
+  // like a body given up on for failure — the difference being that raising the cap
+  // revives it (see `lastMaxBodyBytes`).
   const gaveUp = new Set(
     (await ctx.store.listBodyGiveUps(ctx.jmapAccountId, 2000)).map((k) => k.id),
   );
@@ -372,9 +364,16 @@ export async function enforceBodyRetention(ctx: BodiesContext): Promise<BodiesRe
       const keys = victims.map((v) => v.key);
       await ctx.store.transaction(async (txn) => {
         await txn.deleteBodies(keys);
-        await txn.dequeueBodies(keys);
+        // Marked, NOT merely dequeued: the envelope is still inside the body window, so
+        // C2 would otherwise re-enqueue it on the very next pass and the download would
+        // be evicted again immediately — unbounded data and battery use, and a cycle
+        // chain that never terminates.
+        await txn.markBodyGaveUp(
+          keys.map((key) => ({ key, reason: 'shed-by-cap' as const })),
+        );
       });
       out.evictedBodies += keys.length;
+      out.gaveUp += keys.length;
       out.madeProgress = true;
     }
   }

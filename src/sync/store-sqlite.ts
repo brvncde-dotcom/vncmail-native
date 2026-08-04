@@ -436,7 +436,7 @@ class SqliteTxn implements SyncTxn {
   }
 
   async markBodyGaveUp(
-    entries: Array<{ key: RowKey; reason: 'attempts' | 'notFound'; lastError?: string }>,
+    entries: Array<{ key: RowKey; reason: 'attempts' | 'notFound' | 'shed-by-cap'; lastError?: string }>,
   ): Promise<void> {
     for (const { key, reason, lastError } of entries) {
       // Upsert, because a notFound can arrive for a row that was never retried.
@@ -455,12 +455,22 @@ class SqliteTxn implements SyncTxn {
     }
   }
 
-  async clearBodyGiveUps(jmapAccountId: JmapAccountId): Promise<void> {
+  async clearBodyGiveUps(
+    jmapAccountId: JmapAccountId,
+    reason?: 'attempts' | 'notFound' | 'shed-by-cap',
+  ): Promise<void> {
     // Delete rather than un-flag: a cleared give-up should look like "never queued",
     // so C2's next pass re-enqueues it with a clean attempt count.
+    if (reason === undefined) {
+      await this.db.runAsync(
+        'DELETE FROM body_queue WHERE jmap_account_id = ? AND gave_up = 1',
+        [jmapAccountId],
+      );
+      return;
+    }
     await this.db.runAsync(
-      'DELETE FROM body_queue WHERE jmap_account_id = ? AND gave_up = 1',
-      [jmapAccountId],
+      'DELETE FROM body_queue WHERE jmap_account_id = ? AND gave_up = 1 AND gave_up_reason = ?',
+      [jmapAccountId, reason],
     );
   }
 
@@ -601,6 +611,7 @@ interface StoredFlags {
   lastWindowFloor?: string;
   /** L2: declared explicitly so a stricter backend cannot silently drop it. */
   lastEnvelopeDays?: number;
+  lastMaxBodyBytes?: number;
   lastCycle?: LastCycle;
 }
 

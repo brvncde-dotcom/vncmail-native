@@ -567,6 +567,22 @@ export class SyncEngine {
             backoffDelayMs(attempts, { mode, random: this.deps.random }),
         };
 
+        // A RAISED cap revives bodies shed for space. Symmetric with `lastEnvelopeDays`:
+        // a durable refusal recorded under one policy must not outlive that policy.
+        if (
+          state.lastMaxBodyBytes !== undefined &&
+          rawFloors.maxBodyBytes > state.lastMaxBodyBytes
+        ) {
+          this.log(
+            'info',
+            `body cap raised (${state.lastMaxBodyBytes} -> ${rawFloors.maxBodyBytes}); ` +
+              'reviving bodies previously shed for space',
+          );
+          await store.transaction((txn) =>
+            txn.clearBodyGiveUps(jmapAccountId, 'shed-by-cap'),
+          );
+        }
+
         phases.push('bodies:drain');
         const drained = await drainBodyQueue(bodiesCtx);
         record(drained.error ? 'failed' : 'ok', drained.madeProgress, drained.error);
@@ -613,6 +629,7 @@ export class SyncEngine {
           lastCycle,
           lastWindowFloor: guarded.nextLastWindowFloor,
           lastEnvelopeDays: policy.envelopeDays,
+          lastMaxBodyBytes: rawFloors.maxBodyBytes,
         }),
       );
 

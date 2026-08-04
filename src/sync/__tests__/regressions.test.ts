@@ -916,3 +916,88 @@ describe('M3 (second half): the app gets exactly one engine', () => {
     expect(() => getSyncEngine()).toThrow(/no engine has been created yet/);
   });
 });
+
+describe('H1c: a REAL cap smaller than demand reaches a steady state', () => {
+  it('fills the cap once and then stops fetching, keeping every envelope', async () => {
+    // The zero-cap case is trivially blocked by headroom. This is the review's actual
+    // scenario: far more in-window bodies than the cap can hold, where C2 and the
+    // evictor previously traded the same bytes back and forth forever.
+    harness = makeHarness({
+      // ~520 bytes: a couple of fake bodies fit, the rest cannot.
+      policy: { envelopeDays: 365, bodyDays: 365, maxBodyMB: 0.0005 },
+    });
+    harness.server.createMailbox({ id: 'inbox', name: 'Inbox', role: 'inbox' });
+    for (let i = 0; i < 8; i += 1) {
+      harness.server.createEmail({ id: `W${i}`, receivedAt: isoDaysBefore(i + 1) });
+    }
+
+    await runToQuiescence(harness);
+    const store = await harness.store();
+    const ja = harness.server.accountId;
+
+    const settled = harness.server.calls.getBodies ?? 0;
+    const bytesAfterFirst = await store.bodyBytesTotal();
+
+    for (let cycle = 0; cycle < 10; cycle += 1) {
+      harness.clock.t += 5_000;
+      await harness.engine.runCycle(ACCOUNT, 'unfinished');
+    }
+
+    // Steady state: no further downloads, and the byte total is stable rather than
+    // sawtoothing between over-cap and evicted.
+    expect(harness.server.calls.getBodies ?? 0).toBe(settled);
+    expect(await store.bodyBytesTotal()).toBe(bytesAfterFirst);
+    expect(await store.bodyBytesTotal()).toBeLessThanOrEqual(Math.floor(0.0005 * 1024 * 1024));
+    // Every envelope survives — the cap is a body-tier control (§2.1), so all 8 messages
+    // stay listed and openable online.
+    expect(await store.countEnvelopes({ jmapAccountId: ja })).toBe(8);
+    expect(await store.listOrphanBodies(10)).toEqual([]);
+  });
+});
+
+describe('H1c: C2 refuses to fetch when there is demonstrably no room', () => {
+  it('enqueues nothing when the body store is already at the cap', async () => {
+    // Belt-and-braces behind the durable `shed-by-cap` mark, which is what makes the
+    // loop terminate. This check is the cheaper half: it avoids paying for a download
+    // that has nowhere to go, before any mark exists.
+    const { backfillBodies } = await import('../bodies');
+    harness = makeHarness();
+    seed(harness.server, 1);
+    harness.server.createEmail({ id: 'NOROOM', receivedAt: isoDaysBefore(1) });
+    await runToQuiescence(harness);
+
+    const store = await harness.store();
+    const ja = harness.server.accountId;
+    // Drop one body so there IS a candidate, and clear its queue mark so only the
+    // headroom check can stop it. Without a real candidate the test is vacuous — C2
+    // returns early on an empty candidate list whether or not headroom is checked.
+    await store.transaction(async (txn) => {
+      await txn.deleteBodies([{ jmapAccountId: ja, id: 'NOROOM' }]);
+      await txn.dequeueBodies([{ jmapAccountId: ja, id: 'NOROOM' }]);
+    });
+    expect(
+      (await store.queryEnvelopes({ jmapAccountId: ja, hasBody: false, limit: 10 })).map(
+        (e) => e.id,
+      ),
+    ).toContain('NOROOM');
+
+    const used = await store.bodyBytesTotal();
+    expect(used).toBeGreaterThan(0);
+
+    const result = await backfillBodies({
+      store,
+      port: harness.deps.port!,
+      jmapAccountId: harness.server.accountId,
+      bodyFrom: isoDaysBefore(365),
+      // Exactly full: no headroom at all.
+      maxBodyBytes: used,
+      itemBudget: 50,
+      deadlineAt: T0 + 90_000,
+      now: () => harness.clock.t,
+      shouldAbort: () => false,
+      backoffMs: () => 0,
+    });
+    expect(result.enqueued).toBe(0);
+    expect(result.madeProgress).toBe(false);
+  });
+});

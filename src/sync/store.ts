@@ -172,7 +172,7 @@ export interface BodyQueueEntry {
    * Cleared wholesale by a completed reconcile, so a transient outage self-heals.
    */
   gaveUp?: boolean;
-  gaveUpReason?: 'attempts' | 'notFound';
+  gaveUpReason?: 'attempts' | 'notFound' | 'shed-by-cap';
 }
 
 export interface LastCycle {
@@ -215,6 +215,12 @@ export interface AccountSyncState {
    * is what tells them apart.
    */
   lastEnvelopeDays?: number;
+  /**
+   * The body-tier byte cap in force last cycle. A RAISE must revive bodies previously
+   * shed for space (`gaveUpReason: 'shed-by-cap'`), which is otherwise a durable
+   * refusal — see `clearBodyGiveUps`.
+   */
+  lastMaxBodyBytes?: number;
   lastCycle?: LastCycle;
 }
 
@@ -228,6 +234,7 @@ export type AccountFlagsPatch = Partial<
     | 'reconcileWindowStartedAt'
     | 'lastWindowFloor'
     | 'lastEnvelopeDays'
+    | 'lastMaxBodyBytes'
   >
 >;
 
@@ -318,14 +325,17 @@ export interface SyncTxn {
   dequeueBodies(keys: RowKey[]): Promise<void>;
   /** Records a durable terminal state instead of deleting the row. */
   markBodyGaveUp(
-    entries: Array<{ key: RowKey; reason: 'attempts' | 'notFound'; lastError?: string }>,
+    entries: Array<{ key: RowKey; reason: 'attempts' | 'notFound' | 'shed-by-cap'; lastError?: string }>,
   ): Promise<void>;
   /**
    * Clears every give-up for this account — §7.6 step 5. A reconcile re-verifies the
    * record set from scratch, so a give-up recorded during an outage must not outlive
    * it or a transient failure would permanently deny a body.
    */
-  clearBodyGiveUps(jmapAccountId: JmapAccountId): Promise<void>;
+  clearBodyGiveUps(
+    jmapAccountId: JmapAccountId,
+    reason?: 'attempts' | 'notFound' | 'shed-by-cap',
+  ): Promise<void>;
 
   // ── state: FIELD-LEVEL PATCHES ONLY (S1, I12). No whole-struct write exists. ──
   /**
