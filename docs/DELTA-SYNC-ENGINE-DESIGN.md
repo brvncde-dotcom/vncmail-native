@@ -7,7 +7,9 @@ either pass.
 - Revision 1: 2026-08-04, commit `dc222e8`.
 - Adversarial review: `docs/DELTA-SYNC-DESIGN-REVIEW.md`, commit `987f874` — verdict *"sound with
   specific required fixes; do not implement §7.6, §7.7, §9.2 or §9.3 as written"*, 16 findings.
-- Revision 2: this document. Every finding S1–S16 is addressed; §0.1 maps each to where.
+- Revision 2: 2026-08-04, commit `6a2fde7` — every finding S1–S16 addressed; §0.1 maps each to where.
+- Targeted verification pass on revision 2: four line-level gaps (V1–V4). **Revision 3 is this
+  document**; §0.2 maps those four.
 
 Repo: `brvncde-dotcom/vncmail-native`, branch `claude/delta-sync-design`, worktree
 `~/worktrees/vncmail-native-delta-sync`.
@@ -79,6 +81,20 @@ abstraction boundary, and triggering.
 the review's suggested fix, in both cases by removing the failure mode rather than guarding it —
 S11 (read-time overlay instead of an atomic write-through) and S7's third rung (dropped rather
 than reordered). Both are noted inline and in §15's closing note.
+
+### 0.2 How revision 3 answers the verification pass
+
+| # | Gap | Addressed in |
+|---|---|---|
+| **V1** | Revision 2 made the outbox the *sole* durable record of local intent, then asserted a durability it does not have: `persist()` (`outbox-store.ts:69-73`) is fire-and-forget and `enqueue` (`:62`, `:166-167`) returns before the write lands, so `applyOrQueueBatch` reports `{queued: true}` (`:290-292`) with nothing on disk. §12.3's "no persistence change needed" was wrong. Two overlay read-path claims were also wrong: badge counts cannot be corrected by an email-record overlay, and the call-site list missed `getEmailDetail`. | §5.6 (durability requirement + retracted badge claim), §12.3 (outbox change is now required; `getEmailDetail` added), §13 |
+| **V2** | Only rung 0 of the `maxChanges` ladder was clamped by `min(maxObjectsInGet, 500)`; rungs 1–3 were bare constants, so a server advertising `maxObjectsInGet < 250` makes the *first retry larger than the attempt that just failed* — S7's defect in a narrower form. Also unstated whether reconcile resets the escalation counters. | §7.7 (rungs relative to rung 0), §7.6 step 5 (counters reset, stated) |
+| **V3** | `EnumerationCommitment` was a plain interface, so "only constructible by coverage/reconcile" was a comment, not a compile-time guarantee — unlike the properly-branded `ChangesState`/`SnapshotState`. §6.3's pseudocode also modelled an `as ChangesState` cast, i.e. the exact escape hatch that defeats a brand. | §3.2 (branded + factory-only construction), §6.3 (cast removed), §13 (type-level test) |
+| **V4** | S4's reorder rests on "plain `expo-sqlite` works in Expo Go", which is plausible but untested — `expo-sqlite` is not yet a dependency of this repo. And `purgeAccount`'s reason enum had no case for the encryption flip, whose trigger (`schemaVersion`) lives *inside* the file that the flip makes unreadable. | §9.2 + §14.3 (caveat, flagged as verify-first), §8.4 (`store-format-change` reason + out-of-band format marker), §9.1 (`SyncStoreFactory` marker methods) |
+
+**V1–V4 are all accepted.** One factual correction to the report itself: the single-message offline
+fallback is `getEmailDetail` (`email-store.ts:1034-1056`, cached read at `:1053`), not
+`loadFullEmail`; the gap it identifies is real either way. The badge-count claim is retracted rather
+than implemented, per the report's own recommendation — reasoning in §5.6.
 
 ---
 
@@ -398,13 +414,29 @@ export type ChangesState = string & { readonly __brand: 'ChangesState' };
 /** From a Foo/get response's `state`. A valid cursor ONLY under the ordering rule below. */
 export type SnapshotState = string & { readonly __brand: 'SnapshotState' };
 
-/** Only constructible by coverage/reconcile, and only together with a durable commitment
- *  to enumerate. Carrying it is the proof that the ordering rule holds. */
+// ── V3: the commitment is branded too, not just documented ──
+// A `unique symbol` field cannot be produced by an object literal outside this module
+// (the symbol isn't exported), so `EnumerationCommitment` is genuinely unforgeable rather
+// than unforgeable-by-convention.
+declare const enumerationCommitmentTag: unique symbol;
+
 export interface EnumerationCommitment {
+  readonly [enumerationCommitmentTag]: true;
   readonly jmapAccountId: JmapAccountId;
   readonly snapshot: SnapshotState;
   readonly targetFrom: string;
+  /** Which job minted it — reconcile additionally pins sweepFloor (§7.6 step 0). */
+  readonly kind: 'bootstrap' | 'reconcile';
 }
+
+/** The ONLY constructor. Exported from coverage.ts / reconcile.ts, not from states.ts,
+ *  so the mint site and the enumeration that justifies it live in the same module. */
+export function mintEnumerationCommitment(args: {
+  jmapAccountId: JmapAccountId;
+  snapshot: SnapshotState;
+  targetFrom: string;
+  kind: 'bootstrap' | 'reconcile';
+}): EnumerationCommitment;
 ```
 
 - `SyncTxn.advanceCursor(key, next: ChangesState)` — the delta path's only cursor write. It cannot
@@ -413,6 +445,13 @@ export interface EnumerationCommitment {
   the `CoverageState` (`phase: 'scanning' | 'reconciling'`, `targetFrom`, `sweepFloor`) in the same
   transaction. A seed is therefore never durable without the durable commitment to enumerate that
   justifies it.
+- **V3 — that last guarantee is now type-enforced.** Revision 2 declared
+  `EnumerationCommitment` as a plain interface and asserted in a comment that it was "only
+  constructible by coverage/reconcile" — which any module could falsify with an object literal,
+  making the seed path's teeth strictly weaker than `advanceCursor`'s. The `unique symbol` tag above
+  closes that: the tag is not exported, so `mintEnumerationCommitment` is the only way to obtain the
+  type, and it lives in the module that also runs the enumeration. §13 has the corresponding
+  type-level test.
 
 **The ordering rule (the real invariant, restated as I2 in §3.4):** a `Foo/get` `state` may become
 a cursor only when an enumeration that *starts after that state was captured* is durably committed
@@ -652,12 +691,12 @@ removes the write path**:
 
 - **The durable store holds server-derived state only.** Nothing optimistic is ever written into
   `envelope`/`body`.
-- **`src/stores/outbox-store.ts` remains the sole durable record of local intent.** It already
-  persists before the UI reports success, and its ops are full-state assignments and therefore
-  idempotent (its own header documents this).
+- **`src/stores/outbox-store.ts` becomes the sole durable record of local intent** — and therefore
+  has to actually be durable, which today it is not (V1, §5.6.1).
 - **Reads compose the two**: `overlay.ts` exports a pure
   `applyPendingOps(record, pendingOps) → record`, and every read path that feeds the UI passes the
-  account's pending ops through it. A queued `destroy` hides the record from reads.
+  account's pending ops through it (call sites enumerated in §12.3). A queued `destroy` hides the
+  record from reads.
 - **`apply()` never sees pending ops.** They are not a parameter to change application at all, so
   the delta path has no way to be wrong about them.
 
@@ -667,14 +706,60 @@ the only durable copy is the one the outbox already wrote, and it deletes the "d
 user's offline change" failure mode instead of guarding it — after a flush the server converges and
 the op leaves the queue, so the overlay disappears on its own.
 
-Accepted cost, stated: local list *queries* (e.g. an offline unread filter) see server truth, so a
-predicate over locally-mutated keywords needs the overlay applied after the query rather than inside
-it. Badge counts and list rows apply it; SQL-level filtering on `keywords` does not reflect
-unflushed intent. That is a small, visible, correct-by-construction limitation rather than a
-silent-loss risk.
-
 §12.3 records the consequence: `email-store.ts:38-41`'s `patchCache()` write-through is deleted, not
 ported.
+
+#### 5.6.1 Making the outbox actually durable (V1 — required, not optional)
+
+Revision 2 asserted the outbox "already persists before the UI reports success." **That is false**,
+and it matters more now than it did before, because revision 2 promoted the outbox from a
+belt-and-braces queue to the *only* durable copy of a local mutation:
+
+- `persist()` (`outbox-store.ts:69-73`) is `void AsyncStorage.setItem(...).catch(warn)` — the same
+  fire-and-forget pattern D2 catalogues in `offline-cache-store` and §9.2 bans in the sync path.
+- `enqueue` is typed `(op: OutboxOp) => void` (`:62`) and calls `persist()` as its last statement
+  without awaiting (`:166-167`), so it returns before the write is on disk.
+- `applyOrQueueBatch` therefore returns `{ queued: true }` (`:290-292`) — and the UI reports success
+  — with nothing durable. A kill (or a failed write) in that window loses the mutation silently, and
+  under revision 2's design there is no second copy to recover it from.
+
+**Required change (§12.3):** `enqueue` becomes `async` and **awaits** the persist, `persist()`
+propagates rejection instead of warning, and `applyOrQueueBatch` awaits every enqueue before
+returning `{ queued: true }`. A failed enqueue must **raise to the caller** so the UI can surface
+"couldn't save that change" rather than showing an optimistic state that no longer exists anywhere.
+This is I4 applied to the outbox: revision 2's §9.2 already bans `void AsyncStorage.setItem(...)` in
+the sync path, and the outbox is now part of that path in everything but name.
+
+Callers to update: `applyOrQueue`/`applyOrQueueBatch` (`outbox-store.ts:268-297`) and the
+`email-store` mutations that go through them (`markRead`, `markUnread`, `toggleStar`, `togglePin`,
+`moveToMailbox`, `archiveEmail`, `deleteEmail`, and the batch variants). They already `await`
+`applyOrQueue`, so the change is mostly internal to the store.
+
+#### 5.6.2 What the overlay does *not* cover (V1)
+
+Two claims from revision 2 are corrected here rather than implemented.
+
+**Unread badge counts are not overlaid — retracted, and stated as a known limitation.** Revision 2
+claimed "badge counts and list rows apply it." Only the second half is true. Every unread badge in
+the app reads `Mailbox.unreadEmails`, a **server-maintained scalar** the engine patches from
+`Mailbox/get` (§5.2): `SidebarDrawer.tsx:495`, `mailbox-tree.ts:162` (which aggregates it per
+account), `EmailListScreen.tsx:815`, `FolderSettings.tsx:69` and `:193-195`. A per-email-record
+overlay structurally cannot correct a per-mailbox aggregate — it has no way to know which of the
+mailbox's *uncached* messages are unread, so it cannot recompute the total.
+
+Options considered: maintain a per-mailbox tally of pending `$seen` transitions and subtract it from
+the server scalar. Rejected for v1 — it means a second piece of derived state to keep consistent
+with the queue (including coalescing, F41-style attempt drops, and flush completion), for a cosmetic
+gain, and getting it wrong produces a *wrong number* rather than a stale one. **Decision: don't
+overlay badges.** So while offline, marking a message read updates the row immediately and leaves
+the folder's unread count stale until the outbox flushes and `Mailbox/changes` reports the new count.
+This is **exactly today's behaviour** — `patchCache()` never touched mailbox counts either — so it is
+not a regression; revision 2 simply claimed coverage it did not have.
+
+**SQL-level predicates see server truth.** A query filtering on `keywords` (an offline unread
+filter, or FTS in step 9) does not reflect unflushed intent; the overlay applies to rows *after* the
+query returns. Also a limitation, also not a silent-loss risk: the durable copy of the intent is in
+the outbox either way.
 
 ### 5.7 Boundary with `email-store`
 
@@ -766,7 +851,8 @@ drain(type, jmapAccountId):
     apply(res)          # §5.3/§5.4; may commit records partially (§7.4)
     commit {
       records...,
-      advanceCursor(key, res.newState as ChangesState),  # LAST (I1), branded (I2)
+      advanceCursor(key, res.newState),   # LAST (I1). No cast: res.newState is
+                                          # already a ChangesState from the §12.1 wrapper.
       patch cursor { drainPending: res.hasMoreChanges,
                      consecutiveFailures: 0, lastFailedState: undefined,
                      maxChangesRung: 0 }
@@ -774,7 +860,16 @@ drain(type, jmapAccountId):
     if !res.hasMoreChanges: return OK
 ```
 
-`rungValue(0) = min(maxObjectsInGet, 500)`. Bounding `maxChanges` keeps a page's fetch inside one
+**No `as ChangesState` cast anywhere (V3).** Revision 2's pseudocode wrote
+`advanceCursor(key, res.newState as ChangesState)`, which is both redundant — §12.1's
+`getEmailChangesResult` / `getMailboxChangesResult` already return branded states — and actively
+harmful as a template: an `as` cast is precisely the escape hatch that defeats the brand, and
+pseudocode gets copied. The rule for implementers: **a `as ChangesState` / `as SnapshotState` cast
+outside `src/api/email.ts`'s response parsers is a bug.** Worth an eslint restriction if one is cheap
+to express.
+
+`rungValue(0) = min(maxObjectsInGet, 500)` (and rungs 1–3 are clamped to it — §7.7). Bounding
+`maxChanges` keeps a page's fetch inside one
 `Email/get` batch, so a page is a small, quickly-committable unit — which is what makes crash
 recovery cheap.
 
@@ -917,10 +1012,22 @@ reconcile(jmapAccountId):                                        # unconditional
         delete every local email record with receivedAt >= sweepFloor not seen in step 3
         delete every local email record with receivedAt <  sweepFloor      # unverifiable
   5. coveredFrom = sweepFloor; clear sweepFloor; resyncRequired = false;
-     clear cursor.invalidated*; phase = 'complete'.
+     clear cursor.invalidated*; phase = 'complete';
+     AND reset cursor.consecutiveFailures = 0, lastFailedState = undefined,
+     maxChangesRung = 0  for every cursor of this account            # V2
      If deferredTargetFrom is set (a retention widen arrived mid-reconcile),
      apply it now and set phase='scanning' to extend coverage downward (S2).
 ```
+
+**V2 — step 5 resets the escalation counters, not just `invalidated*`.** Revision 2 cleared only the
+invalidation fields, which left a completed reconcile carrying `consecutiveFailures: 5` and
+`maxChangesRung: 3` into its fresh cursor: the very first post-reconcile failure would satisfy
+`consecutiveFailures >= 5` and immediately re-escalate, so the account would ping-pong
+reconcile → one failure → reconcile, bounded only by §7.6.1's 4-per-24 h ceiling. **Decision: reset
+them.** A successful reconcile is by definition a clean position — a fresh cursor at a fresh state,
+with the record set verified against it — so the failure history belongs to the *old* cursor and
+carrying it forward measures nothing. The ceiling stays as the outer bound for the case where
+reconciles genuinely keep being needed (F39).
 
 **S2 — why step 0 exists.** Without a pinned floor, a user who widens retention *while* a reconcile
 is running (very plausible: the "re-syncing offline mail" banner is exactly what prompts someone to
@@ -1001,16 +1108,31 @@ one). The reviewer could not substantiate that against RFC 8620 §5.2 and **neit
 claim is withdrawn. Worse, removing the bound makes the retry strictly *larger* than the attempt
 that just failed, which actively worsens the likeliest real cause (response too large).
 
+**V2 — every rung is expressed relative to rung 0, not as a bare constant.** Revision 2 clamped only
+rung 0 with `min(maxObjectsInGet, 500)` and wrote 250/50/25 as literals. `getMaxObjectsInGet()`
+(`jmap-client.ts:455-460`) returns `core?.maxObjectsInGet || 500`, so a server advertising
+`maxObjectsInGet = 100` gives rung 0 = 100 and rung 1 = 250 — **the first retry is larger than the
+attempt that just failed**, which is S7's defect in a narrower form. Clamping each rung to rung 0
+makes the ladder monotonically non-increasing for every possible server value:
+
 ```
+rung0 = min(maxObjectsInGet, 500)
+
 escalate(cursor) — counted only when lastFailedState == the state that failed again:
-  rung 0: maxChanges = min(maxObjectsInGet, 500)     (normal)
-  rung 1: 250
-  rung 2: 50
-  rung 3: 25
+  rung 0: rung0                    (normal)
+  rung 1: min(rung0, 250)
+  rung 2: min(rung0, 50)
+  rung 3: min(rung0, 25)
   consecutiveFailures >= 5, or a failure at rung 3
         -> StateInvalid (§7.6): reconcile, subject to §7.6.1's ceiling.
            Log loudly; surface "re-syncing offline mail".
 ```
+
+Consequence worth noting: on a server with a small `maxObjectsInGet` some rungs collapse to the same
+value (at `maxObjectsInGet = 20`, all four rungs are 20). That is correct — the ladder then buys
+nothing and the escalation proceeds to reconcile on the counter alone, which is the right outcome
+when the batch size was never the problem. `rung0` is recomputed per cycle, since `maxObjectsInGet`
+can change when the session is re-read (F19).
 
 Reconcile is always achievable — it needs only the calls a cold start needs — so a stuck cursor
 self-heals within ~5 cycles at the cost of one window rescan. Any cycle in which *that cursor*
@@ -1095,7 +1217,8 @@ Skill step 7 will require wipe-on-logout for the SQLCipher key, so the lifecycle
 boundary already:
 
 ```
-purgeAccount(accountId, reason: 'logout' | 'removed' | 'feature-disabled'):
+purgeAccount(accountId,
+             reason: 'logout' | 'removed' | 'feature-disabled' | 'store-format-change'):
   1. registry: add { accountId, purgePending: true }         # durable intent, crash-safe
   2. epoch++ (registry)  -> every in-flight cycle's next commit is rejected
   3. [once encrypted] delete the SQLCipher key from expo-secure-store
@@ -1124,6 +1247,39 @@ purgeAccount(accountId, reason: 'logout' | 'removed' | 'feature-disabled'):
 - **`AuthenticationError` during a cycle is *not* a purge signal** (§7.1: Auth → cursor unchanged,
   cycle abandoned). Only the auth store's explicit logout purges. A server hiccup returning 401 must
   never delete a user's offline mail.
+
+#### 8.4.1 The out-of-band store-format marker (V4)
+
+The encryption flip (§14.3 step 3.7) and any breaking schema bump both need "purge and re-bootstrap"
+— but revision 2 left the *trigger* undefined, and worse, unimplementable as specified:
+`schemaVersion` lives in `AccountSyncState`, i.e. **inside the SQLite file that the flip makes
+unreadable**. You cannot read the version out of a database you can no longer open, so the code that
+must decide "purge this" has nothing to decide on. Failure mode without a marker: the app opens a
+plain database with a key (or vice versa), gets an opaque "file is not a database" / "file is
+encrypted" error, and there is no defined path from there — likely an unrecoverable launch loop for
+anyone upgrading with an existing store.
+
+Fix — record the format **out of band**, in the registry (§8.1), next to the purge tombstone:
+
+```
+vncmail:sync:registry -> per account: {
+  accountId, purgePending?, epoch,
+  storeFormat: 'sqlite-plain' | 'sqlite-cipher',   # V4
+  schemaVersion: number                            # mirror of the in-file value
+}
+```
+
+At launch, **before** `completePendingPurges()` returns and before any cycle starts, the factory
+compares each account's recorded `(storeFormat, schemaVersion)` against what this build expects. A
+mismatch in either → `purgeAccount(accountId, 'store-format-change')`, then a normal bootstrap (§4).
+The marker is written as the last step of materialising a store, so a crash mid-creation leaves a
+missing/stale marker, which the same comparison treats as a mismatch — safe by default.
+
+The marker is not secret (a format name and an integer), so the registry — plaintext AsyncStorage,
+per §8.1's accepted limitation — is the right home: it must be readable *before* any key exists,
+which is exactly the property needed here. Note this makes the registry's per-account record the only
+thing that must be kept consistent with the store's existence; §8.4's step ordering (tombstone first,
+marker last) is what keeps that one-way.
 
 ---
 
@@ -1225,6 +1381,11 @@ export interface SyncStore {
   purge(): Promise<void>;
 }
 
+export interface StoreFormatMarker {
+  storeFormat: 'sqlite-plain' | 'sqlite-cipher';
+  schemaVersion: number;
+}
+
 export interface SyncStoreFactory {
   /** Lazy: never materialises a file or a key for an account whose feature is off (§9.5). */
   open(accountId: LocalAccountId): Promise<SyncStore>;
@@ -1232,7 +1393,19 @@ export interface SyncStoreFactory {
   listAccounts(): Promise<LocalAccountId[]>;
   epochFor(accountId: LocalAccountId): Promise<number>;
   bumpEpoch(accountId: LocalAccountId, reason: string): Promise<number>;
-  completePendingPurges(): Promise<void>;   // once at launch, before any cycle (§8.4)
+
+  // ── V4: out-of-band format marker (§8.4.1) ──
+  /** Null when absent or unreadable — treated as a mismatch, i.e. purge. */
+  readFormatMarker(accountId: LocalAccountId): Promise<StoreFormatMarker | null>;
+  /** Written LAST when materialising a store, so a crash leaves a mismatch, not a false match. */
+  writeFormatMarker(accountId: LocalAccountId, marker: StoreFormatMarker): Promise<void>;
+
+  /**
+   * Once at launch, before any cycle (§8.4). Completes pending purges AND purges any account
+   * whose format marker doesn't match this build's expectation, with
+   * reason 'store-format-change' (§8.4.1).
+   */
+  completePendingPurges(): Promise<void>;
 }
 ```
 
@@ -1258,7 +1431,17 @@ What this does *not* pull forward: **SQLCipher.** `expo-sqlite` works in Expo Go
 `useSQLCipher` does not (manual §4). So plain SQLite keeps the current dev workflow intact and
 leaves the human-gated key-lifecycle decision (skill step 7) exactly where it is. Enabling
 encryption later changes the file format, which is free here because §14.1 already specifies
-discard-and-rebuild: the flip is purge + re-bootstrap.
+discard-and-rebuild: the flip is purge + re-bootstrap (triggered per §8.4's `store-format-change`).
+
+> **V4 — verify this before scheduling on it.** "Plain `expo-sqlite` works in Expo Go" is inference
+> from the manual's §4 note that *`useSQLCipher`* is the incompatible part, not something anyone has
+> tested here: `expo-sqlite` is **not currently a dependency of this repo** (`package.json` has no
+> `expo-sqlite` entry). The whole §14.3 reordering rests on it, so **step 3.1 starts by confirming
+> it empirically** — add `expo-sqlite`, open a database in Expo Go on a device, and only then commit
+> to the ordering. If plain `expo-sqlite` also needs a custom dev client on Expo SDK 54, the
+> reordering still works but its "keeps the current dev workflow intact" benefit evaporates, and the
+> §9.2 contingency (AsyncStorage first, D3 left open) becomes worth re-weighing. Cheap to check,
+> expensive to assume.
 
 Two backends therefore exist: `store-sqlite.ts` (the app) and `store-memory.ts` (unit tests, and the
 second implementation that proves the boundary).
@@ -1590,9 +1773,23 @@ real bug in shipped code, independent of this engine, and worth landing on its o
   `offline-cache-store.patch()`; optimistic state is no longer written into the durable store at
   all. `dropFromCache()` (`email-store.ts:42-44`) likewise goes: a queued `destroy` is hidden by the
   overlay and removed for real when `Email/changes` reports it.
-- `outbox-store.ts` — **no persistence change needed** (§5.6 removes the atomicity requirement
-  revision 1 created). It needs one addition: a selector for "all pending ops for this account,
-  keyed by email id", cheap enough to call on every read path.
+  **Every read path that feeds the UI must apply it (V1) — the complete list:**
+  1. `email-store.selectMailbox`'s cache seed (`:646-663`) — list rows.
+  2. `email-store.refreshEmails`'s offline fallback (`:941-961`) — list rows.
+  3. `email-store.getEmailDetail`'s cached single-message fallback (`:1034-1056`, cached read at
+     `:1053`) — **missed by revision 2's list.** Without it, opening a message offline after marking
+     it read offline shows it unread again, which is the most visible possible instance of the bug
+     the overlay exists to prevent.
+
+  Not overlaid, per §5.6.2: unread badge counts (`SidebarDrawer.tsx:495`, `mailbox-tree.ts:162`,
+  `EmailListScreen.tsx:815`, `FolderSettings.tsx:69`/`:193-195`) and SQL-level `keywords` predicates.
+- `outbox-store.ts` — **a persistence change IS required (V1, §5.6.1)**, reversing revision 2's
+  "no persistence change needed": `persist()` must propagate rejection instead of
+  `void …catch(warn)` (`:69-73`), `enqueue` becomes `async` and awaits it (`:62`, `:166-167`), and
+  `applyOrQueue`/`applyOrQueueBatch` (`:268-297`) await every enqueue before returning
+  `{ queued: true }`, raising to the caller on failure. Plus the addition revision 2 already noted: a
+  selector for "all pending ops for this account, keyed by email id", cheap enough to call on every
+  read path.
 - `offline-cache-store.ts` — its `SyncState`/`SyncPhase` and record cache are superseded.
   `OfflineCacheBanner` needs the new phases (`bootstrapping`, `delta`, `bodies`, `resyncing`,
   `partial`) mapped onto its existing five. `AboutDataSettings` gains an envelope/body split, a
@@ -1615,18 +1812,34 @@ The `[QA]` gate for this step. `apply.ts` and `overlay.ts` being pure is what ma
 - Every §11 row expressible as `apply(localState, page, fetched) → mutations`: F7, F8, F11, F26, F27,
   F36, F48, plus §5.4's create/update/destroy overlap ordering.
 - Overlay: F28/F29 as pure `applyPendingOps` cases.
-- Cursor state machine: all eight rules of §7.5. **Per S5 the D4 regression test is now a type-level
+- Cursor state machine: all eight rules of §7.5. **Per S5 the D4 regression test is a type-level
   test** (`advanceCursor` must not accept a `SnapshotState`) *plus* a runtime test that the seed path
   requires an `EnumerationCommitment`. Revision 1's test — "a `get` state is rejected as a cursor" —
   was itself wrong, since bootstrap and reconcile legitimately seed from one; that is precisely how
   the literal rule would have been bypassed at the one call site that matters.
+- **Type-level (V3): a plain object literal is rejected where `EnumerationCommitment` is expected**,
+  mirroring the `advanceCursor`/`SnapshotState` test. Both are `@ts-expect-error` assertions in a
+  `*.type-test.ts` compiled by `npm run typecheck` — a type-level test only earns its keep if a
+  regression fails the build, so these must not live in a file the typecheck skips. Add a third: no
+  `as ChangesState` / `as SnapshotState` cast exists outside `src/api/email.ts` (grep-based
+  assertion or an eslint `no-restricted-syntax` rule; §6.3).
 - `classify()` over the whole §7.1 taxonomy, including the unknown-type default (F16).
-- Escalation ladder: monotonic shrink, per-cursor counters, "any job failed ⇒ cycle failed" (F47).
+- **Escalation ladder (V2):** monotonic *non-increasing* for a range of `maxObjectsInGet` values —
+  explicitly including a server advertising less than 250 (assert rung 1 ≤ rung 0, which is the
+  regression test for the bare-constant bug) and one advertising less than 25 (all rungs collapse,
+  escalation still terminates). Plus per-cursor counters and "any job failed ⇒ cycle failed" (F47),
+  and that a completed reconcile resets `consecutiveFailures`/`maxChangesRung` (§7.6 step 5).
+- **Outbox durability (V1):** `enqueue` rejects when the underlying write rejects, and
+  `applyOrQueueBatch` does not return `{ queued: true }` before the write resolves. Fake a failing
+  AsyncStorage; assert the caller sees an error rather than a silent success.
 - Backoff: monotonic, jittered, capped, `Retry-After` override.
 - Retention: F23/F23B/F24/F24B/F25, and the F44 clock-jump guard.
 - Reconcile floor pinning (F38) and the reconcile ceiling (F39) as pure state-machine tests.
 - `SyncStore` **contract tests run against both backends** (`store-memory`, `store-sqlite`),
   including the S1 lost-update sequence (F37) and `clearRecords` clearing the body queue (F35).
+- **Format marker (V4):** a mismatched, stale, or absent marker triggers
+  `purgeAccount('store-format-change')` at launch *before* any cycle; a crash between materialising a
+  store and writing its marker leaves a mismatch (safe), not a false match (§8.4.1).
 
 **Integration against a real Stalwart.** Note the honest cost (S16): the docker-compose
 `integration/` fixture with alice/bob/carol lives in the **sibling `vncmail-plus` repo**, not this
@@ -1665,9 +1878,12 @@ from-scratch bootstrap. This is what finds ordering bugs no hand-written case wi
    body, so the two can never run concurrently.
 3. **Order of work — revised per S4.** SQLite comes *before* the engine:
    1. **Plain `expo-sqlite`** (no SQLCipher): the §9.3 schema, `store-sqlite.ts`, `store-memory.ts`,
-      and the `SyncStore` contract tests that run against both. This is the part of skill step 6 that
-      does not need the step-7 key decision, and it keeps Expo Go working (manual §4: only
-      `useSQLCipher` is incompatible).
+      the format marker (§8.4.1), and the `SyncStore` contract tests that run against both backends.
+      This is the part of skill step 6 that does not need the step-7 key decision, and it keeps Expo
+      Go working (manual §4: only `useSQLCipher` is incompatible).
+      **First task in this sub-step, before any schema work: confirm that claim empirically** —
+      `expo-sqlite` is not yet a dependency here, so add it and open a database in Expo Go on a real
+      device. §9.2's V4 note explains what changes if the answer is no.
    2. `apply.ts` + `overlay.ts` + `errors.ts` + `states.ts`, fully unit-tested with no engine.
    3. Cursors and the delta drain (jobs A1/A2).
    4. Coverage (job B) and the bootstrap sequence.
@@ -1725,13 +1941,18 @@ from-scratch bootstrap. This is what finds ordering bugs no hand-written case wi
     removes cursors and records together.
 12. **Local mutations are a read-time overlay, not a write-through** (S11). The durable store holds
     server truth only; the outbox stays the single durable record of intent. This deletes the
-    atomicity requirement rather than guarding it.
+    atomicity requirement rather than guarding it — **but it makes the outbox's own durability
+    load-bearing, and today it is fire-and-forget, so §5.6.1 requires fixing that first** (V1).
+    Unread badge counts and SQL `keywords` predicates are explicitly *not* overlaid (§5.6.2).
 13. **Single-flight with coalescing, never abort-to-serve** (D7), **plus a resume trigger for
     unfinished work** with progress-gated chaining (S8).
 14. **Push is a wake signal, not a cursor.** Mobile will consume the same JMAP WebSocket as Electron
     — foreground only, behind `onStateChange(StateChange)`; background stays on the relay.
 15. **SQLite ships before the engine** (S4), plain first and encrypted later — which fixes D3 for
-    real, makes S1's atomicity a database property, and defers the human-gated key decision.
+    real, makes S1's atomicity a database property, and defers the human-gated key decision. The
+    encryption flip has a defined trigger: an out-of-band store-format marker in the registry, since
+    `schemaVersion` lives inside the file the flip makes unreadable (§8.4.1, V4). **The "plain
+    `expo-sqlite` works in Expo Go" premise is untested and is step 3.1's first task** (V4).
 16. **Disabling offline caching purges** that account's store (S13), and a disabled account's store is
     never materialised at all (§9.5).
 
