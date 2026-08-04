@@ -126,6 +126,28 @@ describe('branded cursor states cannot be cast into existence (§6.3, §13)', ()
     expect(offenders).toEqual([]);
   });
 
+  it('mintEnumerationCommitment is called from coverage.ts and nowhere else', () => {
+    // The design wanted the factory to LIVE in coverage.ts so the mint site and the
+    // enumeration that justifies it sit together. It stays in states.ts instead,
+    // because moving the unexported tag there would make the storage boundary
+    // (store.ts, which needs the TYPE for seedCursor) import from a job module and
+    // invert the layering §9.1 establishes. This assertion buys back the property
+    // co-location was for — and it is stronger, since co-location never prevented a
+    // second module from calling the factory.
+    const offenders: string[] = [];
+    for (const file of files) {
+      if (file.includes('__tests__')) continue;
+      if (file.endsWith(join('sync', 'states.ts'))) continue;
+      if (file.endsWith(join('sync', 'coverage.ts'))) continue;
+      for (const { line, number } of codeLines(readFileSync(file, 'utf8'))) {
+        if (/\bmintEnumerationCommitment\s*\(/.test(line)) {
+          offenders.push(`${file}:${number}: ${line.trim()}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
   it('the minting functions are only called from the API layer and tests (§12.1)', () => {
     // The wrappers in src/api/email.ts are the legitimate mint sites: they are
     // the boundary where a JMAP response becomes a typed value. Anywhere else is
