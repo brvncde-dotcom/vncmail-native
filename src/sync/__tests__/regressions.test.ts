@@ -891,3 +891,28 @@ describe('L1: a narrow does not claim a range that was never enumerated', () => 
     expect(adjustment.evictBelow).toBe('2026-08-01T00:00:00Z');
   });
 });
+
+describe('M3 (second half): the app gets exactly one engine', () => {
+  it('returns the same instance and refuses a second configuration', async () => {
+    const { getSyncEngine, resetSyncEngineForTests } = await import('../engine');
+    resetSyncEngineForTests();
+    harness = makeHarness();
+
+    const first = getSyncEngine(harness.deps);
+    expect(getSyncEngine()).toBe(first);
+    expect(getSyncEngine(harness.deps)).toBe(first);
+
+    // A second deps object means a second factory, which means two per-account mutexes
+    // and no serialisation between them.
+    const other = makeHarness();
+    expect(() => getSyncEngine(other.deps)).toThrow(/already exists with different deps/);
+    other.host.cleanup();
+    resetSyncEngineForTests();
+  });
+
+  it('refuses to hand out an engine before one is configured', async () => {
+    const { getSyncEngine, resetSyncEngineForTests } = await import('../engine');
+    resetSyncEngineForTests();
+    expect(() => getSyncEngine()).toThrow(/no engine has been created yet/);
+  });
+});

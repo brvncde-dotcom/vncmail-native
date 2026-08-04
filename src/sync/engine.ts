@@ -727,3 +727,55 @@ export class SyncEngine {
     }
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Single instance per process (M3's second half)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Single-flight is per `SyncEngine` instance, and the per-account mutex that serialises
+// transactions lives on the `SyncStore` instance — which `SqliteStoreFactory.open()`
+// caches per account. So two engines sharing ONE factory are safe, but two
+// engine+factory PAIRS for the same account share nothing and could interleave across
+// transaction boundaries.
+//
+// Nothing constructs a second pair today, but the wiring stage plausibly could: several
+// screens and a background task might each reach for an engine. Rather than leave that
+// to discipline, the app gets exactly one, created once.
+//
+// Tests construct engines directly on purpose — each with its own temp-file factory, so
+// they are genuinely separate worlds.
+
+let singleton: SyncEngine | null = null;
+let singletonDeps: EngineDeps | null = null;
+
+/**
+ * The app's one engine. Call with deps the first time; later calls must pass the same
+ * deps object (or none) and get the same instance back.
+ */
+export function getSyncEngine(deps?: EngineDeps): SyncEngine {
+  if (!singleton) {
+    if (!deps) {
+      throw new Error('getSyncEngine: no engine has been created yet; pass deps on first call');
+    }
+    singleton = new SyncEngine(deps);
+    singletonDeps = deps;
+    return singleton;
+  }
+  if (deps && deps !== singletonDeps) {
+    // Silently returning the existing engine would hide a real bug — a second
+    // configuration means someone built a second factory too, which is exactly the
+    // interleaving hazard this exists to prevent.
+    throw new Error(
+      'getSyncEngine: an engine already exists with different deps. Two engine+factory ' +
+        'pairs for the same account can interleave across transaction boundaries; reuse ' +
+        'the existing instance instead.',
+    );
+  }
+  return singleton;
+}
+
+/** Tests and logout only. */
+export function resetSyncEngineForTests(): void {
+  singleton = null;
+  singletonDeps = null;
+}
