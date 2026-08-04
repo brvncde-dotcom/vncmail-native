@@ -5,6 +5,7 @@ import React from 'react';
 import { View, Text, StyleSheet, Pressable } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CloudDownload, X } from 'lucide-react-native';
+import { useShallow } from 'zustand/react/shallow';
 import { useOfflineCacheStore } from '../stores/offline-cache-store';
 import { useSettingsStore } from '../stores/settings-store';
 import { useSyncStatusStore } from '../stores/sync-status-store';
@@ -24,11 +25,18 @@ export function OfflineCacheBanner(): React.ReactElement | null {
   const v1Sync = useOfflineCacheStore((s) => s.sync);
   const v1Abort = useOfflineCacheStore((s) => s.requestAbort);
   const v1Reset = useOfflineCacheStore((s) => s.resetSync);
-  const v2 = useSyncStatusStore((s) => ({
-    phase: s.phase,
-    message: s.message,
-    unfinished: s.unfinished,
-  }));
+  // useShallow is required here, not optional style: a selector that returns a fresh
+  // object literal every call breaks useSyncExternalStore's "snapshot didn't change"
+  // check, which React reports as "getSnapshot should be cached to avoid an infinite
+  // loop" — and it isn't just a warning, the component actually re-renders every time,
+  // continuously. Caught by running the app for real, not by any of the unit tests.
+  const v2 = useSyncStatusStore(
+    useShallow((s) => ({
+      phase: s.phase,
+      message: s.message,
+      unfinished: s.unfinished,
+    })),
+  );
   const v2Reset = useSyncStatusStore((s) => s.reset);
 
   // §12.3 maps the engine's new phases onto the five this bar already renders. The engine
