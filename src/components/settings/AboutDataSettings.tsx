@@ -8,9 +8,10 @@ import Button from '../Button';
 import { spacing, radius, typography, type ThemePalette } from '../../theme/tokens';
 import { useColors } from '../../theme/colors';
 import { useSettingsStore } from '../../stores/settings-store';
-import { useOfflineCacheStore } from '../../stores/offline-cache-store';
+import { clearOfflineMail, syncNow } from '../../sync/offline-facade';
+import { useOfflineStats, useOfflineSyncView } from '../../sync/offline-hooks';
 import { useOutboxStore } from '../../stores/outbox-store';
-import { runOfflineSync, formatBytes } from '../../lib/offline-sync';
+import { formatBytes } from '../../lib/offline-sync';
 
 const APP_VERSION = Constants.expoConfig?.version ?? '0.0.0';
 const GIT_COMMIT = (Constants.expoConfig?.extra as { commit?: string } | undefined)?.commit ?? 'dev';
@@ -136,21 +137,34 @@ export function AboutDataSettings() {
 
   const queuedChanges = useOutboxStore((s) => s.entries.length);
   const flushOutbox = useOutboxStore((s) => s.flush);
-  const cacheCount = useOfflineCacheStore((s) => s.totalCount());
-  const cacheBytes = useOfflineCacheStore((s) => s.totalSize());
-  const cacheHydrated = useOfflineCacheStore((s) => s.hydrated);
-  const cacheHydrate = useOfflineCacheStore((s) => s.hydrate);
-  const sync = useOfflineCacheStore((s) => s.sync);
-  const clearAllCache = useOfflineCacheStore((s) => s.clearAll);
-  const syncBusy = sync.phase === 'scanning' || sync.phase === 'fetching';
+  // Both of these branch v1/v2 internally. Reading `useOfflineCacheStore` here directly is
+  // what produced the reported bug: with the engine on and 761 envelopes in SQLite, this
+  // screen said "Nothing cached yet" and "Sync now" ran the v1 bulk downloader.
+  const sync = useOfflineSyncView();
+  const stats = useOfflineStats();
+  const cacheCount = stats.count;
+  const cacheBytes = stats.bytes;
+  const syncBusy = sync.busy;
 
   useEffect(() => {
     if (!hydrated) void hydrate();
-    if (!cacheHydrated) void cacheHydrate();
-  }, [hydrated, hydrate, cacheHydrated, cacheHydrate]);
+  }, [hydrated, hydrate]);
 
   const handleSyncNow = () => {
-    void runOfflineSync({ days: offlineDays, maxMB: offlineMaxMB });
+    void (async () => {
+      const target = await syncNow();
+      if (target === 'unavailable') {
+        // Deliberately no v1 fallback — see `syncNow`. Two engines writing an offline copy
+        // of the same mail from different cursors is what §14.2 exists to prevent.
+        Alert.alert(
+          'Sync unavailable',
+          'Offline sync is not running right now. It will start again once you are online with a live connection.',
+        );
+        return;
+      }
+      // Refresh the counts once the cycle has had a chance to land.
+      stats.refresh();
+    })();
     // Also drain any queued offline changes while we're at it.
     void flushOutbox();
   };
@@ -161,7 +175,16 @@ export function AboutDataSettings() {
       `Remove ${cacheCount} cached message${cacheCount === 1 ? '' : 's'} (${formatBytes(cacheBytes)})?`,
       [
         { text: 'Cancel', style: 'cancel' },
-        { text: 'Clear', style: 'destructive', onPress: () => { void clearAllCache(); } },
+        {
+          text: 'Clear',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              await clearOfflineMail();
+              stats.refresh();
+            })();
+          },
+        },
       ],
     );
   };
@@ -279,7 +302,9 @@ export function AboutDataSettings() {
             </Text>
           </View>
           <Text style={styles.cacheStatsSub}>
-            {sync.phase === 'fetching'
+            {sync.engineActive && sync.message
+              ? sync.message
+              : sync.phase === 'fetching'
               ? `Downloading ${sync.completed}/${sync.total}…`
               : sync.phase === 'scanning'
                 ? 'Scanning recent mail…'

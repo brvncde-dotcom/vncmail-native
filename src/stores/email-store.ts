@@ -44,13 +44,24 @@ import {
   readMailboxPage,
   readMessage,
 } from '../sync/offline-reads';
+import { offlineEngineOwnsStore } from '../sync/offline-mode';
 
 // Keep the offline body cache consistent with an optimistic/queued mutation so
 // re-opening a message while offline shows the change. Fire-and-forget.
+// The v1 optimistic write-through. §12.3 says the overlay's arrival DELETES this; §14.2 says
+// the v1 path stays available behind the flag, so it is gated rather than removed — deleting
+// it now would break the very path the flag exists to preserve.
+//
+// Gating matters beyond tidiness: with the engine on, these writes grow a SECOND on-device
+// copy of the mail in AsyncStorage that nothing reads, and §5.6 is explicit that the durable
+// store holds server-derived state only, with local intent living in the outbox and composed
+// in at read time.
 function patchCache(id: string, changes: { keywords?: Record<string, boolean>; mailboxIds?: Record<string, boolean> }): void {
+  if (offlineEngineOwnsStore()) return;
   void useOfflineCacheStore.getState().patch(id, changes);
 }
 function dropFromCache(ids: string[]): void {
+  if (offlineEngineOwnsStore()) return;
   void useOfflineCacheStore.getState().remove(ids);
 }
 // Compute an email's full mailboxIds map after removing one mailbox and adding
@@ -1151,12 +1162,16 @@ export const useEmailStore = create<EmailState>()(
       const fresh = await getFullEmail(id, accountId);
       // Opportunistically refresh the cached copy so the next offline open
       // reflects the latest keywords without needing a full sync.
-      const cache = useOfflineCacheStore.getState();
-      if (cache.has(id)) {
-        try {
-          const size = JSON.stringify(fresh).length;
-          await cache.put(fresh, size);
-        } catch { /* ignore — best-effort refresh */ }
+      // Same gating as patchCache: with the engine on, the body tier is the engine's job
+      // (jobs C1/C2) and this would be a second, unread copy.
+      if (!offlineEngineOwnsStore()) {
+        const cache = useOfflineCacheStore.getState();
+        if (cache.has(id)) {
+          try {
+            const size = JSON.stringify(fresh).length;
+            await cache.put(fresh, size);
+          } catch { /* ignore — best-effort refresh */ }
+        }
       }
       return fresh;
     } catch (err) {

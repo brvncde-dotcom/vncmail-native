@@ -1,15 +1,16 @@
 // Live banner that mirrors the UpdateBanner's footprint, surfaced while the
 // offline mail sync is running. Hidden once the sync settles to idle/done.
+//
+// Which engine it is reporting on is decided in `useOfflineSyncView()`, not here — that
+// hook is the single v1/v2 branch point, added after the Settings screen was found NOT to
+// branch while this component did.
 
 import React from 'react';
 import { View, Text, StyleSheet, Pressable } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CloudDownload, X } from 'lucide-react-native';
-import { useShallow } from 'zustand/react/shallow';
-import { useOfflineCacheStore } from '../stores/offline-cache-store';
-import { useSettingsStore } from '../stores/settings-store';
-import { useSyncStatusStore } from '../stores/sync-status-store';
 import { useUpdatesStore } from '../stores/updates-store';
+import { useOfflineSyncView } from '../sync/offline-hooks';
 import { formatBytes } from '../lib/offline-sync';
 import { spacing, radius, typography, type ThemePalette } from '../theme/tokens';
 import { useColors } from '../theme/colors';
@@ -18,59 +19,11 @@ export function OfflineCacheBanner(): React.ReactElement | null {
   const c = useColors();
   const styles = React.useMemo(() => makeStyles(c), [c]);
   const insets = useSafeAreaInsets();
-  // Two engines, one banner. The v1 store's `sync` and the v2 engine's status are
-  // different shapes, so the flag decides which one this bar is reporting on — showing
-  // stale v1 state while v2 is doing the work would be worse than showing nothing.
-  const engineV2 = useSettingsStore((s) => s.offlineSyncEngineV2);
-  const v1Sync = useOfflineCacheStore((s) => s.sync);
-  const v1Abort = useOfflineCacheStore((s) => s.requestAbort);
-  const v1Reset = useOfflineCacheStore((s) => s.resetSync);
-  // useShallow is required here, not optional style: a selector that returns a fresh
-  // object literal every call breaks useSyncExternalStore's "snapshot didn't change"
-  // check, which React reports as "getSnapshot should be cached to avoid an infinite
-  // loop" — and it isn't just a warning, the component actually re-renders every time,
-  // continuously. Caught by running the app for real, not by any of the unit tests.
-  const v2 = useSyncStatusStore(
-    useShallow((s) => ({
-      phase: s.phase,
-      message: s.message,
-      unfinished: s.unfinished,
-    })),
-  );
-  const v2Reset = useSyncStatusStore((s) => s.reset);
+  const sync = useOfflineSyncView();
+  const engineV2 = sync.engineActive;
+  const requestAbort = sync.cancel;
+  const resetSync = sync.dismiss;
 
-  // §12.3 maps the engine's new phases onto the five this bar already renders. The engine
-  // reports no item counts — it is cursor-driven, not "N of M" — so v2 shows an
-  // indeterminate bar with a phase label rather than a fake percentage.
-  const sync = React.useMemo(() => {
-    if (!engineV2) return v1Sync;
-    const map: Record<string, { phase: string; label?: string }> = {
-      idle: { phase: 'idle' },
-      bootstrapping: { phase: 'scanning', label: 'Downloading your mail history…' },
-      coverage: { phase: 'scanning', label: 'Filling in older messages…' },
-      resyncing: { phase: 'scanning', label: 'Re-syncing offline mail…' },
-      delta: { phase: 'fetching', label: 'Checking for changes…' },
-      bodies: { phase: 'fetching', label: 'Downloading message bodies…' },
-      partial: { phase: 'fetching', label: 'Paused — will continue shortly' },
-      done: { phase: 'done' },
-      error: { phase: 'error' },
-    };
-    const mapped = map[v2.phase] ?? { phase: 'idle' };
-    return {
-      phase: mapped.phase as typeof v1Sync.phase,
-      total: 0,
-      completed: 0,
-      fetched: 0,
-      bytes: 0,
-      message: v2.phase === 'error' ? v2.message : mapped.label,
-    };
-  }, [engineV2, v1Sync, v2]);
-
-  // Cancelling a v2 cycle is an abort at the next page boundary; there is no destructive
-  // cancel to offer, and the engine resumes on its own via T9, so the bar only offers
-  // dismiss on v2.
-  const requestAbort = engineV2 ? () => undefined : v1Abort;
-  const resetSync = engineV2 ? v2Reset : v1Reset;
   // When UpdateBanner is stacked above us it already absorbs the status-bar
   // inset, so we only add it when we're the topmost banner.
   const cachedLatest = useUpdatesStore((s) => s.cachedLatest);
@@ -96,8 +49,9 @@ export function OfflineCacheBanner(): React.ReactElement | null {
 
   if (sync.phase === 'idle') return null;
 
-  const pct =
-    sync.total > 0
+  const pct = sync.indeterminate
+    ? 100
+    : sync.total > 0
       ? Math.min(100, Math.round((sync.completed / sync.total) * 100))
       : sync.phase === 'done' ? 100 : 0;
 
@@ -134,7 +88,7 @@ export function OfflineCacheBanner(): React.ReactElement | null {
       return null;
   }
 
-  const showCancel = !engineV2 && (sync.phase === 'scanning' || sync.phase === 'fetching');
+  const showCancel = sync.canCancel;
   const showDismiss = sync.phase === 'done' || sync.phase === 'cancelled' || sync.phase === 'error';
   const isError = sync.phase === 'error';
 
@@ -148,7 +102,7 @@ export function OfflineCacheBanner(): React.ReactElement | null {
           <View style={styles.progressTrack}>
             {/* v2 is cursor-driven, so there is no honest denominator — a full-width
                 track reads as "working" without inventing a percentage. */}
-            <View style={[styles.progressFill, { width: engineV2 ? '100%' : `${pct}%` }]} />
+            <View style={[styles.progressFill, { width: `${pct}%` }]} />
           </View>
         )}
       </View>

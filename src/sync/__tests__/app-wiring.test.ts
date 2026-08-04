@@ -392,3 +392,68 @@ describe('§8.4: turning the feature off purges the store', () => {
     expect(await reopened.countEnvelopes()).toBe(0);
   });
 });
+
+describe('"Sync now" really does write the SQLite store (the device check, in-process)', () => {
+  it('a manual press adds envelopes to SQLite and leaves the v1 store untouched', async () => {
+    // The in-process analogue of pulling the .db off the device: drive the REAL facade,
+    // through the REAL coordinator and engine, into the REAL SQLite store, and assert the
+    // row count moved. The reported bug was that this press hit `runOfflineSync` instead,
+    // so the SQLite file never changed while v1's AsyncStorage "last sync" timestamp did.
+    const { syncNow } = await import('../offline-facade');
+    w = build();
+    seed(w.server, 4);
+
+    const store = await w.factory.open(ACCOUNT);
+    expect(await w.factory.isMaterialised(ACCOUNT)).toBe(false);
+
+    let ranV1 = 0;
+    let v1Cleared = 0;
+    const target = await syncNow({
+      factory: w.factory,
+      engineEnabled: () => true,
+      cacheEnabled: () => true,
+      localAccountId: () => ACCOUNT,
+      jmapAccountId: () => w.server.accountId,
+      fireTrigger: (reason) => {
+        w.coordinator.fire(reason);
+        return true;
+      },
+      runV1Sync: async () => {
+        ranV1 += 1;
+      },
+      v1Stats: () => ({ count: 0, bytes: 0 }),
+      clearV1: async () => {
+        v1Cleared += 1;
+      },
+    });
+
+    expect(target).toBe('v2');
+    // T3 is never throttled, so the cycle runs on the next drain of the trigger queue.
+    await w.tick(0);
+
+    // The SQLite store now holds real rows...
+    expect(await w.factory.isMaterialised(ACCOUNT)).toBe(true);
+    expect(await store.countEnvelopes({ jmapAccountId: w.server.accountId })).toBe(4);
+    // ...bodies were fetched by jobs C1/C2...
+    expect(await store.bodyBytesTotal()).toBeGreaterThan(0);
+    // ...and the v1 path was never involved.
+    expect(ranV1).toBe(0);
+    expect(v1Cleared).toBe(0);
+
+    // The same numbers the Settings screen now shows.
+    const { offlineStats } = await import('../offline-facade');
+    const stats = await offlineStats({
+      factory: w.factory,
+      engineEnabled: () => true,
+      cacheEnabled: () => true,
+      localAccountId: () => ACCOUNT,
+      jmapAccountId: () => w.server.accountId,
+      fireTrigger: () => true,
+      runV1Sync: async () => undefined,
+      v1Stats: () => ({ count: 0, bytes: 0 }),
+      clearV1: async () => undefined,
+    });
+    expect(stats).toMatchObject({ source: 'v2', count: 4 });
+    expect(stats.bytes).toBeGreaterThan(0);
+  });
+});
