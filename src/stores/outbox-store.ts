@@ -330,3 +330,15 @@ export async function applyOrQueueBatch(
 export function applyOrQueue(op: OutboxOp, onlineRun?: () => Promise<void>): Promise<ApplyResult> {
   return applyOrQueueBatch([op], onlineRun);
 }
+
+/**
+ * Every pending op for the active account, in queue order — the input the §5.6 read-time
+ * overlay needs.
+ *
+ * Cheap enough to call on every read path: the queue is a handful of entries in memory
+ * (it only holds what has not yet flushed), and this is a map build, not a scan of
+ * anything on disk.
+ */
+export function pendingOpsForOverlay(): OutboxOp[] {
+  return useOutboxStore.getState().entries.map((e) => e.op);
+}

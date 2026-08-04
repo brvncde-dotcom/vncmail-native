@@ -224,6 +224,20 @@ interface PersistedSettings {
   // Hard cap on the on-disk body cache, in megabytes. When a sync pushes the
   // cache past this, the oldest messages are evicted to fit.
   offlineCacheMaxMB: number;
+
+  // ── Delta-sync engine v2 (design §14.2) ──
+  //
+  // Default OFF so the old bulk-download path stays available during dogfood. The flag
+  // gates trigger REGISTRATION, not just the engine body, so the two can never run
+  // concurrently — an important detail, because both would be writing an offline copy
+  // of the same mail from different cursors.
+  offlineSyncEngineV2: boolean;
+  // §2.1 splits the single window in two: envelopes are ~1 KB and are what the offline
+  // list needs, bodies are 10-500 KB and only needed when a message is opened. So the
+  // envelope window is deliberately much wider, and the MB cap applies to bodies only.
+  // `offlineCacheDays` remains the v1 knob; these two are v2's.
+  offlineEnvelopeDays: number;
+  offlineBodyDays: number;
 }
 
 const DEFAULT_PERSISTED: PersistedSettings = {
@@ -318,6 +332,14 @@ const DEFAULT_PERSISTED: PersistedSettings = {
   offlineCacheEnabled: false,
   offlineCacheDays: 7,
   offlineCacheMaxMB: 50,
+
+  offlineSyncEngineV2: false,
+  // §15 open question 1 left the concrete numbers to the human; these are the first
+  // values that match the decision's shape (envelopes >> bodies) and are one line to
+  // change. A year of envelopes is ~1 KB x N; 30 days of bodies is what the MB cap
+  // actually governs.
+  offlineEnvelopeDays: 365,
+  offlineBodyDays: 30,
 };
 
 export interface SettingsState extends PersistedSettings {

@@ -33,6 +33,17 @@ import { generateAccountId } from '../lib/account-utils';
 import { useSettingsStore } from './settings-store';
 import { useOfflineCacheStore } from './offline-cache-store';
 import { useOutboxStore, applyOrQueue, applyOrQueueBatch, type OutboxOp } from './outbox-store';
+// §5.6's read-time overlay. The durable store holds SERVER-DERIVED state only; local
+// intent lives in the outbox and is composed in on every read that feeds the UI. Applied
+// on both the v1 and v2 read paths — redundant on v1 (which still write-throughs) but
+// harmless, since every outbox primitive assigns whole state and is idempotent.
+import {
+  livePendingOps,
+  overlayList,
+  overlayOne,
+  readMailboxPage,
+  readMessage,
+} from '../sync/offline-reads';
 
 // Keep the offline body cache consistent with an optimistic/queued mutation so
 // re-opening a message while offline shows the change. Fire-and-forget.
@@ -702,21 +713,37 @@ export const useEmailStore = create<EmailState>()(
     let seededQueryState = incoming?.queryState;
 
     if (seededEmails.length === 0) {
-      const cacheStore = useOfflineCacheStore.getState();
-      if (!cacheStore.hydrated) await cacheStore.hydrate();
-      if (cacheStore.totalCount() > 0) {
-        try {
-          const limit = useSettingsStore.getState().emailsPerPage;
-          // Cached messages carry raw JMAP mailboxIds, so look up by the
-          // unprefixed id rather than the sidebar's shared-folder key.
-          seededEmails = await cacheStore.getEmailsInMailbox(
-            rawMailboxId(state.mailboxes, mailboxId),
-            Math.max(limit, 50),
-          );
-          seededTotal = seededEmails.length;
-        } catch (err) {
-          console.warn('[email-store] cache seed failed:', err);
+      try {
+        const limit = useSettingsStore.getState().emailsPerPage;
+        // Cached messages carry raw JMAP mailboxIds, so look up by the
+        // unprefixed id rather than the sidebar's shared-folder key.
+        const rawId = rawMailboxId(state.mailboxes, mailboxId);
+        const ref = refFor(state.mailboxes, mailboxId);
+        // §12.3 item 1. `null` means the engine is not the active source, so fall through
+        // to the v1 cache rather than rendering an empty list.
+        const fromEngine = state.activeAccountId
+          ? await readMailboxPage(
+              state.activeAccountId,
+              ref.accountId ?? '',
+              rawId,
+              Math.max(limit, 50),
+            )
+          : null;
+        if (fromEngine !== null) {
+          seededEmails = fromEngine;
+        } else {
+          const cacheStore = useOfflineCacheStore.getState();
+          if (!cacheStore.hydrated) await cacheStore.hydrate();
+          if (cacheStore.totalCount() > 0) {
+            seededEmails = overlayList(
+              await cacheStore.getEmailsInMailbox(rawId, Math.max(limit, 50)),
+              livePendingOps(),
+            );
+          }
         }
+        seededTotal = seededEmails.length;
+      } catch (err) {
+        console.warn('[email-store] cache seed failed:', err);
       }
     }
 
@@ -1011,13 +1038,24 @@ export const useEmailStore = create<EmailState>()(
       // tells the user the data is stale.
       if (existing.length === 0) {
         try {
-          const cacheStore = useOfflineCacheStore.getState();
-          if (!cacheStore.hydrated) await cacheStore.hydrate();
-          if (cacheStore.totalCount() > 0) {
-            const cached = await cacheStore.getEmailsInMailbox(
-              ref.id,
-              Math.max(limit, 50),
-            );
+          // §12.3 item 2.
+          let cached: Email[] = [];
+          const fromEngine = activeAccountId
+            ? await readMailboxPage(activeAccountId, ref.accountId ?? '', ref.id, Math.max(limit, 50))
+            : null;
+          if (fromEngine !== null) {
+            cached = fromEngine;
+          } else {
+            const cacheStore = useOfflineCacheStore.getState();
+            if (!cacheStore.hydrated) await cacheStore.hydrate();
+            if (cacheStore.totalCount() > 0) {
+              cached = overlayList(
+                await cacheStore.getEmailsInMailbox(ref.id, Math.max(limit, 50)),
+                livePendingOps(),
+              );
+            }
+          }
+          {
             if (
               get().activeAccountId === activeAccountId &&
               get().currentMailboxId === currentMailboxId &&
@@ -1122,8 +1160,22 @@ export const useEmailStore = create<EmailState>()(
       }
       return fresh;
     } catch (err) {
+      // §12.3 item 3 — the one revision 2's list missed, and the most visible instance of
+      // the bug the overlay prevents: opening a message offline after marking it read
+      // offline would otherwise show it unread again.
+      const state = get();
+      const owner = accountId ?? currentAccountId(state);
+      const fromEngine = state.activeAccountId
+        ? await readMessage(state.activeAccountId, owner ?? '', id)
+        : null;
+      if (fromEngine) return fromEngine;
       const cached = await useOfflineCacheStore.getState().get(id);
-      if (cached) return cached;
+      if (cached) {
+        const overlaid = overlayOne(cached, livePendingOps());
+        // `null` means a queued destroy hides it; the message is on its way out, so the
+        // original error is the honest answer rather than a stale copy.
+        if (overlaid) return overlaid;
+      }
       throw err;
     }
   },
