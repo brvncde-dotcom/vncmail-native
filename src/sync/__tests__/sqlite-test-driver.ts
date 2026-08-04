@@ -6,9 +6,18 @@
 // This is a test double for the *driver*, not for `SyncStore`: `store-sqlite.ts`
 // runs unmodified on top of it, which is what makes it worth having.
 
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import type { SqlParams, SqlRunResult, SqliteDriver, SqlValue } from '../sqlite-driver';
+import type {
+  SqlParams,
+  SqlRunResult,
+  SqliteDriver,
+  SqliteHost,
+  SqlValue,
+} from '../sqlite-driver';
 
 // node:sqlite rejects booleans as bind values; expo-sqlite accepts them and
 // coerces. Normalise here so the store's SQL is identical on both.
@@ -21,6 +30,10 @@ class NodeSqliteDriver implements SqliteDriver {
   private closed = false;
 
   constructor(private readonly db: DatabaseSync) {}
+
+  get isClosed(): boolean {
+    return this.closed;
+  }
 
   private assertOpen(): void {
     if (this.closed) throw new Error('database is closed');
@@ -71,4 +84,44 @@ export function openTestDriver(): SqliteDriver {
 /** File-backed, for the tests that need to survive a "restart" (reopen). */
 export function openTestDriverAtPath(path: string): SqliteDriver {
   return new NodeSqliteDriver(new DatabaseSync(path));
+}
+
+/**
+ * A `SqliteHost` over real files in a throwaway temp directory, so the contract
+ * tests exercise the same open/reopen/delete lifecycle §8.4 specifies —
+ * including "the purge really removed the file", which an in-memory database
+ * cannot demonstrate.
+ */
+export function createTestHost(): SqliteHost & { dir: string; cleanup(): void } {
+  const dir = mkdtempSync(join(tmpdir(), 'vncmail-sync-'));
+  const live = new Map<string, NodeSqliteDriver>();
+
+  return {
+    dir,
+    async open(databaseName: string): Promise<SqliteDriver> {
+      const existing = live.get(databaseName);
+      if (existing && !existing.isClosed) return existing;
+      const driver = new NodeSqliteDriver(new DatabaseSync(join(dir, databaseName)));
+      live.set(databaseName, driver);
+      return driver;
+    },
+    async delete(databaseName: string): Promise<void> {
+      const existing = live.get(databaseName);
+      if (existing) {
+        await existing.closeAsync();
+        live.delete(databaseName);
+      }
+      rmSync(join(dir, databaseName), { force: true });
+    },
+    cleanup(): void {
+      for (const driver of live.values()) void driver.closeAsync();
+      live.clear();
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+/** Whether the host still has a file for this database — the purge assertion. */
+export function hostHasDatabase(dir: string, databaseName: string): boolean {
+  return existsSync(join(dir, databaseName));
 }

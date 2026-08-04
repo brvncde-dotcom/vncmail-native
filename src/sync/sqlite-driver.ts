@@ -58,3 +58,21 @@ export async function openExpoSqliteDriver(databaseName: string): Promise<Sqlite
   const { openDatabaseAsync } = await import('expo-sqlite');
   return openDatabaseAsync(databaseName);
 }
+
+/**
+ * Open + delete, which is the whole lifecycle the store needs from the platform.
+ * `delete` is what §8.4 step 4 calls; keeping it here rather than in the store
+ * means the store never imports expo-sqlite either.
+ */
+export interface SqliteHost {
+  open(databaseName: string): Promise<SqliteDriver>;
+  delete(databaseName: string): Promise<void>;
+}
+
+export const expoSqliteHost: SqliteHost = {
+  open: openExpoSqliteDriver,
+  async delete(databaseName: string): Promise<void> {
+    const { deleteDatabaseAsync } = await import('expo-sqlite');
+    await deleteDatabaseAsync(databaseName);
+  },
+};
