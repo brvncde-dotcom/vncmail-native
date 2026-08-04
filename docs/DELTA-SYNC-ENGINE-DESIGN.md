@@ -1,51 +1,90 @@
 # JMAP Delta-Sync Engine — Design
 
-Status: **design only, not implemented.** Produced for `VNCprodbuild` Phase 2 step 5
-(`[AI, L]`). Per that step, this document must pass an independent, fresh-context adversarial
-review *before* any implementation begins. Nothing in `src/` was changed by the pass that wrote
-this file.
+Status: **design only, not implemented. Revision 2**, after independent adversarial review.
+Produced for `VNCprodbuild` Phase 2 step 5 (`[AI, L]`). Nothing in `src/` has been changed by
+either pass.
 
-Author pass: 2026-08-04. Repo: `brvncde-dotcom/vncmail-native`, branch `claude/delta-sync-design`.
+- Revision 1: 2026-08-04, commit `dc222e8`.
+- Adversarial review: `docs/DELTA-SYNC-DESIGN-REVIEW.md`, commit `987f874` — verdict *"sound with
+  specific required fixes; do not implement §7.6, §7.7, §9.2 or §9.3 as written"*, 16 findings.
+- Revision 2: this document. Every finding S1–S16 is addressed; §0.1 maps each to where.
+
+Repo: `brvncde-dotcom/vncmail-native`, branch `claude/delta-sync-design`, worktree
+`~/worktrees/vncmail-native-delta-sync`.
 
 Companion documents:
 - `~/.claude/skills/VNCprodbuild/SKILL.md` — the build plan; this is step 5 of Phase 2.
 - `~/worktrees/vncmail-electron/docs/VNCMAIL-NATIVE-BUILD-MANUAL.md` — program narrative;
-  §4 decision log (multi-account isolation required; `expo-sqlite` + `useSQLCipher`; CNG),
-  §6.1 (what this repo already has), §7 (remaining roadmap).
+  §4 decision log, §6.1 (what this repo already has), §7 (remaining roadmap).
+- `docs/DELTA-SYNC-DESIGN-REVIEW.md` — the review this revision answers.
 
 Normative references, cited by section throughout:
 - **RFC 8620** (JMAP core) — §1.2 ids, §3.6.1 request-level errors, §3.6.2 method-level errors,
-  §5.2 `Foo/changes`, §7.1 `StateChange`, §7.2 `PushSubscription`.
+  §5.1 `Foo/get`, §5.2 `Foo/changes`, §5.5 `Foo/query` (incl. `anchor`), §7.1 `StateChange`.
 - **RFC 8621** (JMAP Mail) — §2.2 `Mailbox/changes` (incl. `updatedProperties`), §4.1 Email
-  property mutability, §4.2 `Email/get`, §4.3 `Email/changes`, §4.5 `Email/queryChanges`.
+  property mutability, §4.2 `Email/get`, §4.3 `Email/changes`, §4.4.1 `Email/query`
+  `FilterCondition`, §4.5 `Email/queryChanges`.
 
 ---
 
 ## 0. Scope
 
 **In scope (this design):** the mechanism that keeps a per-account local mail store in step with
-the server using `Email/changes` and `Mailbox/changes`, including first-sync bootstrap, change
-application, pagination, crash recovery, error/retry semantics, multi-account isolation, the
-storage abstraction boundary, and triggering.
+the server using `Email/changes` and `Mailbox/changes` — first-sync bootstrap, change application,
+pagination, crash recovery, error/retry semantics, multi-account isolation, the storage
+abstraction boundary, and triggering.
 
 **Out of scope, deliberately:**
-- The SQLCipher backend itself (skill step 6). This design defines the interface it plugs into.
-- FTS5 index population (step 9) — but §9.4 reserves the hook.
-- Offline compose/outbox (step 10) — already exists as `src/stores/outbox-store.ts`; §5.6
-  defines how the engine interacts with it.
-- Background task registration (`BGTaskScheduler`/`WorkManager`, step "platform hardening").
-  §10.5 defines the constraint the engine must satisfy so that step is a wiring change.
-- Calendar/Contacts/Files delta sync. Same engine shape would apply; not designed here.
-- Shared/group (Stalwart "group account") mail. §8.2 makes this a data-model no-op to add later.
+- SQLCipher key derivation/lifecycle (skill step 7, human-gated). §14 now sequences *plain*
+  `expo-sqlite` ahead of the engine (S4); enabling `useSQLCipher` remains a later, separate step.
+- FTS5 index population (step 9) — §9.4 reserves the hook.
+- Offline compose/outbox *transport* (step 10). The existing `src/stores/outbox-store.ts` is
+  reused; §5.6 defines the (revised) interaction and §12.3 the one change it needs.
+- Background task registration (`BGTaskScheduler`/`WorkManager`). §10.5 defines the constraint so
+  that step is wiring only.
+- Calendar/Contacts/Files delta sync.
+- Shared/group (Stalwart "group account") mail. Account-scoped keys are in place from day one
+  (S3) so adding it later is inserting rows.
 
-**Non-goal:** bit-for-bit compatibility with today's cache. §14 specifies a discard-and-rebuild
-migration; there is no reason to migrate an unencrypted JSON cache that a single sync can rebuild.
+**Non-goal:** compatibility with today's cache. §14.1 specifies discard-and-rebuild.
+
+### 0.1 How revision 2 answers the review
+
+| # | Finding | Addressed in |
+|---|---|---|
+| **D4** | citation wording wrong; severity stands | §1.3 D4, rewritten |
+| **D6** | understated — actual persisted cross-account contamination | §1.3 D6, severity raised |
+| **D3** | overstated, and not closed in v1 | §1.3 D3, softened; "closed by" claim removed; §14.3 reordered |
+| **D2** | scope wider than `persistIndex` | §1.3 D2, scope broadened |
+| **S1** | whole-blob `AccountSyncState` write ⇒ lost update | §3.1, §3.4 I12, §9.1 (field-level `SyncTxn` patches, per-account mutex), §8.3 (epoch owner), F37 |
+| **S2** | reconcile doesn't pin `targetFrom` ⇒ permanent deletion | §3.1 `sweepFloor`, §7.6 step 0/4, F38 |
+| **S3** | JMAP ids are per-account, not global | §9.3 (account-scoped PKs), §8.2 (overclaim retracted) |
+| **S4** | D3 not closed in v1 | §9.2 (SQLite is the shipping backend), §14.3 (reordered), §1.3 D3 |
+| **S5** | I2 false as stated, and unenforced | §3.2 branded state types, §3.4 I2 restated as ordering, §7.5, §9.1 `advanceCursor`/`seedCursor`, §13 |
+| **S6** | per-account failure counters guard per-cursor machines | §3.1 (counters on `SyncCursor`), §7.7, F47 |
+| **S7** | `maxChanges` ladder grows on attempt 3 | §7.7 (monotonic 500→250→50→25; unbounded rung dropped, unsubstantiated RFC claim retracted) |
+| **S8** | `partial` cycle has no resume trigger | §10.1 T9, §10.3 chaining rule, F46 |
+| **S9** | no body-backfill job; reconcile blocks delta too long | §2 job C2, §7.6 (delta live immediately, only sweep gated), F23–F24B, F49 |
+| **S10** | `oldState` mismatch can loop | §7.6.1 (re-issue once, reconcile ceiling), F39 |
+| **S11** | local-mutation overlay unowned/non-atomic | §5.6 rewritten — read-time overlay, no write-through, atomicity problem deleted; §12.3 |
+| **S12** | orphan body rows leak against the cap | §9.1, §9.3 (`received_at` on `body`), §7.4, F40/F41/F45 |
+| **S13** | feature-disable isn't an abort/cleanup path | §10.1 T10, §8.3, §8.4 (purge-on-disable), §9.5 (lazy open), F42 |
+| **S14** | `after` is spec-defined inclusive | §6.1 corrected, +1 ms rung gated, F33 |
+| **S15** | no rule for a corrupt state blob | §3.4 I13, F43 |
+| **S16** | six smaller items | §13 (cross-repo fixture), §8.1 (registry plaintext), §3.4 I8 + F44 (clock), §5.1 (ordering justification), §5.3/F26 (absent-id no-op), §2 I11 |
+| Part 3 | three machines share single-flight, not fully independent | §2, §3.4 I11, F48 |
+| Part 4 | `android/` vs CNG | §16 — flagged as a program-level decision, deliberately not resolved here |
+
+**Disagreements: none.** Every S1–S16 finding is accepted. Two are implemented differently from
+the review's suggested fix, in both cases by removing the failure mode rather than guarding it —
+S11 (read-time overlay instead of an atomic write-through) and S7's third rung (dropped rather
+than reordered). Both are noted inline and in §15's closing note.
 
 ---
 
 ## 1. What exists today, verified
 
-Read before designing; file:line references are to `claude/delta-sync-design` at time of writing.
+File:line references are to this worktree at commit `987f874`.
 
 ### 1.1 The thing being replaced
 
@@ -62,17 +101,15 @@ Read before designing; file:line references are to `claude/delta-sync-design` at
 prefixes (`webmail:offline-cache:index:v2:<accountId>`, `…:entry:v2:<accountId>:<emailId>`),
 an in-memory index of `{id, receivedAt, size, cachedAt}`, and the `SyncState` the UI reads.
 
-UI surfaces: `src/components/OfflineCacheBanner.tsx` (phase/progress banner),
-`src/components/settings/AboutDataSettings.tsx` (stats, manual "Sync now", clear).
-Triggers: `App.tsx:277-284` (2s after a live session appears, re-fires when the days/MB
-settings change). Settings: `offlineCacheEnabled/Days/MaxMB` (`settings-store.ts:222-226`,
-defaults `false / 7 / 50`).
+UI: `src/components/OfflineCacheBanner.tsx`, `src/components/settings/AboutDataSettings.tsx`.
+Triggers: `App.tsx:277-284`. Settings: `offlineCacheEnabled/Days/MaxMB`
+(`settings-store.ts:222-226`, defaults `false / 7 / 50`).
 
 ### 1.2 What already exists and should be reused
 
-The repo is **further along than the manual implies**. `src/api/email.ts` already has
-`/changes` wrappers, and `src/stores/email-store.ts` already drives an incremental path for the
-*visible list*:
+The repo is further along than the manual implies. `src/api/email.ts` already has `/changes`
+wrappers, and `src/stores/email-store.ts` already drives an incremental path for the *visible
+list*:
 
 | Existing | Location |
 |---|---|
@@ -85,122 +122,133 @@ The repo is **further along than the manual implies**. `src/api/email.ts` alread
 | Account-switch race guards | `email-store.ts:131-138` (`jmapClientServesActiveAccount`) |
 | SSE `StateChange` → refresh | `src/api/push.ts:120-157`, `email-store.ts:969-1003` |
 | Idempotent full-state mutation queue | `src/stores/outbox-store.ts` |
+| Cross-account id-collision workaround | `src/api/email.ts:19-20` (`sharedMailboxId`) — the existing evidence for S3 |
 
-The engine designed here is **not** a replacement for the email-store's list-level
-`queryChanges` path — that path exists to keep *one visible mailbox window* fresh and is
-correct for that job. The engine owns the *durable local store*. §5.7 defines the boundary.
+The engine is **not** a replacement for the email-store's list-level `queryChanges` path — that
+path keeps *one visible mailbox window* fresh and is correct for that job. The engine owns the
+*durable local store*. §5.7 defines the boundary.
 
-### 1.3 Defects found in the existing code (must not be inherited)
+### 1.3 Defects in the existing code (must not be inherited)
 
-These are the reasons "just add `Email/changes` to `offline-sync.ts`" is not the answer. Each is
-a real, reproducible gap, listed so the reviewer can check the new design closes it.
+Severities and wordings below incorporate the review's Part 1 audit.
 
-- **D1 — cached envelopes go permanently stale.** `offline-sync.ts:77` skips any id already in
-  the index, with the comment "bodies on disk are immutable per messageId". Bodies are indeed
-  immutable (RFC 8621 §4.1), but `keywords` and `mailboxIds` are the two mutable properties, and
-  they are stored in the same blob. A message cached while unread stays unread in the offline
-  list forever unless the user happens to open it online (`email-store.ts:1044-1050`) or a local
-  mutation patches it (`offline-cache-store.ts:210-223`). Read/unread state read offline is
-  simply wrong. *Closed by §5.3 (Email `updated` → 3-property refresh).*
-- **D2 — storage write failures are swallowed.** `persistIndex()`
-  (`offline-cache-store.ts:97-101`) is fire-and-forget with a `console.warn`. An index write that
-  fails leaves entry blobs on disk that nothing references (leak), or — in the new
-  cursor-carrying world — would let a cursor advance over data that was never durably written.
-  *Closed by I4 and §9.2 (storage errors must reject, never warn-and-continue).*
-- **D3 — every folder open is an O(cache) scan.** `getEmailsInMailbox()`
-  (`offline-cache-store.ts:275-301`) reads and JSON-parses *every* cached entry to test
-  `email.mailboxIds[mailboxId]`, because the index doesn't carry mailbox membership. At the
-  50 MB cap that is thousands of AsyncStorage reads on the offline path. *Closed by §9.3's
-  schema (indexed envelope table + `email_mailbox` membership rows).*
-- **D4 — a cursor can advance to the wrong state token.** `email-store.ts:885-889` writes
-  `nextEmailState ?? fetchState ?? emailState`, where `fetchState` is the `state` from an
-  `Email/get` (`email-store.ts:849-851`). Two problems: (a) an `Email/get` `state` is a *later*
-  snapshot than the `Email/changes` page just applied, so adopting it silently skips every
-  change in between; (b) when `getEmailChanges` returns `null` (line 831-835 treats that as
-  `cannotCalculateChanges`), the code clears `nextEmailState` and then falls back to
-  `fetchState`, adopting a fresh cursor **without** doing the full resync RFC 8620 §5.2 mandates.
-  Blast radius today is limited to the visible list, but the identical pattern in a durable store
-  is silent, permanent data loss. *Closed by I2 (only `Foo/changes.newState` advances a cursor)
-  and §7.5.*
-- **D5 — all method-level errors collapse to `null`.** `getEmailChanges`
-  (`email.ts:366-367`) and `getMailboxChanges` (`email.ts:144-145`) return `null` for *any*
-  `error` response. So `cannotCalculateChanges` (→ full resync mandated),
-  `serverUnavailable` (→ retry later), `tooManyRequests`/rate limiting (→ back off), and
-  `invalidArguments` (→ our bug) are indistinguishable. Under today's code that mostly costs a
-  wasted refetch; under a cursor-carrying engine it means a transient 503 triggers a full resync,
-  or worse, is mistaken for a state invalidation. *Closed by §12.1 (typed error results).*
-- **D6 — `runOfflineSync` has no local-account guard.** `queryEmailsByFilter`
-  (`email.ts:733-747`) resolves `jmapClient.accountId` at call time. `offline-cache-store`'s
-  `put()` re-checks `activeAccountId` before stamping the index (`:195`), so data doesn't land in
-  the wrong bucket — but the *fetch* follows whatever account the client now serves, so after a
-  mid-sync account switch the run silently downloads account B's mail and throws it away, while
-  reporting progress against account A. *Closed by §8.3 (epoch-guarded cycles).*
-- **D7 — "sync again" cancels instead of syncing.** `offline-sync.ts:41-44`: if a run is in
-  flight, the new call sets the abort flag and returns. A user who taps "Sync now" during a sync
-  gets a *cancelled* sync and no new one. *Closed by §10.3 (single-flight with coalescing).*
-- **D8 — unstable pagination is latent.** Today there is no paging at all (one 5000-id query),
-  so the bug can't fire; but the obvious fix ("add `position`") would introduce it. See §6.2.
+- **D1 — cached envelopes go permanently stale.** `offline-sync.ts:77` skips any id already in the
+  index, with the comment "bodies on disk are immutable per messageId". Bodies are indeed
+  immutable (RFC 8621 §4.1), but `keywords` and `mailboxIds` are the two mutable properties and
+  live in the same blob. A message cached while unread stays unread in the offline list forever
+  unless the user opens it online (`email-store.ts:1044-1050`) or a local mutation patches it
+  (`offline-cache-store.ts:210-223`). *Closed by §5.3.*
+- **D2 — storage write failures are swallowed, store-wide.** Not just `persistIndex()`
+  (`offline-cache-store.ts:97-101`): the same fire-and-forget / silently-caught pattern recurs in
+  `put()` (`:187-191`), `patch()` (`:214-222`), `remove()` (`:229-231`) and `clearAll()`
+  (`:266-268`). A failed write leaves unreferenced blobs (leak) or an index that disagrees with
+  disk. In a cursor-carrying engine it would let a cursor advance over data never durably
+  written. **Scope the eventual fix to the whole store, not one function.** *Closed by I4 and
+  §9.2.*
+- **D3 — sparse-folder reads are unbounded (narrower than revision 1 claimed).**
+  `getEmailsInMailbox()` (`offline-cache-store.ts:275-301`) sorts the index by `receivedAt` and
+  breaks at `limit`, so a *populated* folder is bounded. The unbounded case is the
+  **sparse-or-empty folder**: it reads and JSON-parses every cached entry to find few or no
+  matches. At the 50 MB cap that is thousands of AsyncStorage reads on the offline path.
+  **Revision 1's "closed by §9.3" claim is withdrawn** — §9.3 is the SQLite schema, and revision 1
+  shipped the AsyncStorage backend first, so D3 would have shipped unfixed. *Closed by §9.3 only
+  under §14.3's revised sequencing (SQLite before the engine); if that sequencing is rejected, D3
+  ships unfixed and §9.2's contingency applies.*
+- **D4 — a transient error on `Email/changes` fast-forwards the cursor with no resync.**
+  Revision 1 stated two claims; the first was wrong and is withdrawn. `email-store.ts:885-889`
+  writes `nextEmailState ?? fetchState ?? emailState`, and `nextEmailState` is set to
+  `ec.newState` whenever a changes page was applied (`:830`) — so a successfully-applied page
+  short-circuits the fallback and an `Email/get` state is **not** adopted in that case. The real
+  bug is the other path: because `getEmailChanges` returns `null` for *any* error (D5), a
+  transient 503 or a rate-limit sets `nextEmailState = undefined` (`:834`), and the code then
+  adopts `fetchState` — an `Email/get` `state` captured *this cycle* (`:849-851`) — as the new
+  Email cursor, **with no resync**. Every change between the old cursor and that snapshot is
+  skipped, permanently and silently. Severity unchanged; it is a live bug in shipped code.
+  *Closed by I2 (as restated in §3.4) and §7.5.*
+- **D5 — all method-level errors collapse to `null`.** `getEmailChanges` (`email.ts:366-367`) and
+  `getMailboxChanges` (`email.ts:144-145`) return `null` for any `error` response, so
+  `cannotCalculateChanges` (→ resync mandated), `serverUnavailable` (→ retry), rate limiting
+  (→ back off) and `invalidArguments` (→ our bug) are indistinguishable. This is also the trigger
+  for D4. *Closed by §12.1.*
+- **D6 — persisted cross-account contamination (severity raised).** Revision 1 described this as
+  wasted bandwidth; it is worse. `runOfflineSync` checks the abort flag only at *chunk* boundaries
+  (`offline-sync.ts:100`), after up to 25 full bodies have already been fetched, and
+  `offline-cache-store.put()` reads `activeAccountId` **fresh at write time** (`:184`), not from
+  the value the fetch was issued under. So if `setAccount(B)` lands between a chunk's
+  `getFullEmails()` resolving and its `put()` calls, **account A's messages are written under
+  account B's entry keys and stamped into account B's index** — the post-await re-check (`:195`)
+  only guards a switch *during* the write, not before it. This is actual persisted cross-account
+  leakage and, on the reviewer's assessment, the worst bug currently shipped. *Closed by I6 and
+  §8.3.*
+- **D7 — "sync again" cancels instead of syncing.** `offline-sync.ts:41-44`: a call while a run is
+  in flight sets the abort flag and returns. Tapping "Sync now" during a sync yields a *cancelled*
+  sync and no new one. *Closed by §10.3.*
+- **D8 — unstable pagination is latent.** No paging today (one 5000-id query), so the bug can't
+  fire — but the obvious fix ("add `position`") would introduce it. See §6.2.
 
 ---
 
 ## 2. Architecture
 
-Three **independent, separately-persisted** state machines per account. Keeping them separate is
-the central structural decision of this design: it is what lets the cursor advance while bodies
-lag, lets a retention change not look like a resync, and lets a crash lose at most one unit of
-work in each.
+Three state machines per account — **logically** independent (separate persisted state, separate
+failure handling, separate budgets), **operationally** serialised (§3.4 I11). The review's Part 3
+is right that presenting them as fully independent invites a future "run bodies in parallel, it's
+separate state" optimisation that would immediately produce orphan bodies, so the coupling is now
+stated as an invariant rather than left implied.
 
 ```
                          ┌───────────────────────────────┐
    triggers (§10) ──────▶│  SyncEngine.runCycle(account) │
                          └───────────────┬───────────────┘
-                                         │ single-flight per account
-             ┌───────────────────────────┼───────────────────────────┐
-             ▼                           ▼                           ▼
-   ┌───────────────────┐      ┌────────────────────┐      ┌────────────────────┐
-   │ A. DELTA          │      │ B. COVERAGE        │      │ C. BODIES          │
-   │ Mailbox/changes   │      │ historical backfill│      │ drain body_queue   │
-   │ Email/changes     │      │ (Email/query scan) │      │ Email/get full     │
-   │ state: cursors    │      │ state: coverage    │      │ state: body_queue  │
-   └───────────────────┘      └────────────────────┘      └────────────────────┘
-             │                           │                           │
-             └───────────────────────────┴───────────────────────────┘
+                                         │ single-flight per account,
+                                         │ jobs run SEQUENTIALLY (I11)
+   ┌────────────┬──────────────┬─────────┴───────┬─────────────────┐
+   ▼            ▼              ▼                 ▼                 ▼
+ A1. Mailbox  A2. Email     B. COVERAGE       C1. bodies       C2. body
+ /changes     /changes      envelope backfill  queue drain      backfill
+ cursor       cursor        coverage state     body_queue       (S9)
+   └────────────┴──────────────┴─────────────────┴─────────────────┘
                                          ▼
                               ┌─────────────────────┐
-                              │  SyncStore  (§9)    │  ← AsyncStorage now,
-                              │  per-account        │    SQLCipher at step 6
+                              │  SyncStore  (§9)    │  ← plain expo-sqlite (§14.3),
+                              │  per-account        │    SQLCipher flip later
                               └─────────────────────┘
 ```
 
-**A. Delta** is the steady state: drain `Mailbox/changes`, then `Email/changes`, page by page,
-advancing the cursor once per fully-applied page. Cheap: `updated` emails cost a 3-property
-`Email/get`; `destroyed` costs nothing.
+**A. Delta** — drain `Mailbox/changes`, then `Email/changes`, advancing each cursor once per
+fully-applied page. Cheap: an `updated` email costs a 3-property `Email/get`; a `destroyed` costs
+nothing.
 
-**B. Coverage** owns *history*. The delta stream only reports what changed since a cursor; it
-never delivers mail that already existed when the cursor was created. Coverage is the job that
-walks backwards to fill the retention window, and the job that runs when the user widens
-"keep 7 days" to "keep 30 days". It is also the *bootstrap* (§4).
+**B. Coverage** — owns *history*. `/changes` structurally never delivers mail that already existed
+when the cursor was created, so coverage is the job that walks the envelope window, and the job
+that runs when the window widens. It is also the bootstrap (§4).
 
-**C. Bodies** owns the expensive part. `created` emails enter A's path as envelopes only; a
-durable queue then fetches bodies at low priority. A failed or slow body fetch can therefore
-never hold back the cursor, and a kill mid-download costs one batch.
+**C. Bodies** — owns the expensive part. `created` emails enter A's path as envelopes only; C1
+drains a durable queue at low priority. **C2 (new, S9)** backfills bodies for envelopes that are
+already covered but have no body — the case that arises when the *body* window widens after
+coverage has completed, and the self-heal for bodies dropped after repeated failure. Without C2,
+widening body retention silently does nothing for already-covered envelopes.
 
-### 2.1 Two record tiers
+### 2.1 Two record tiers, two retention windows
 
-| Tier | Properties | Who writes it | Retention |
+| Tier | Properties | Written by | Retention |
 |---|---|---|---|
-| **Envelope** | `EMAIL_LIST_PROPERTIES` (`email.ts:6-9`) — id, threadId, mailboxIds, keywords, size, receivedAt, from, to, cc, subject, preview, hasAttachment | A (delta) and B (coverage) | the *envelope window* |
-| **Body** | `bodyStructure, textBody, htmlBody, bodyValues, attachments, blobId, bcc, replyTo, sentAt` | C (bodies) | the *body window*, subject to the MB cap |
+| **Envelope** | `EMAIL_LIST_PROPERTIES` (`email.ts:6-9`) | A, B | `offlineEnvelopeDays` |
+| **Body** | `bodyStructure, textBody, htmlBody, bodyValues, attachments, blobId, bcc, replyTo, sentAt` | C1, C2 | `offlineBodyDays`, plus the MB cap |
 
-Rationale: envelopes are ~1 KB and are what the offline list, the FTS index (step 9), and the
-"is this message still in scope" retention decision all need. Bodies are ~10–500 KB and are only
-needed when a message is actually opened. Today's cache conflates them, which is why the 50 MB
-cap translates to only a few hundred messages being visible offline at all.
+Envelopes are ~1 KB and are what the offline list, the FTS index (step 9) and the retention
+decision need. Bodies are ~10–500 KB and are only needed when a message is opened.
 
-**Decision:** envelope window = body window = `offlineCacheDays` in v1, so user-visible behaviour
-doesn't change on day one; the MB cap applies to bodies only. The tiers are separate in the
-schema and in the retention policy so a later "envelopes: 1 year, bodies: 30 days" setting is a
-policy change, not a redesign.
+**Resolved since revision 1 (human decision):** the two windows are now *separate settings* and
+**envelope retention is widened well beyond body retention.** The MB cap applies to bodies only,
+so a widened envelope window costs kilobytes per message and never evicts a message out of the
+offline list. Revision 1's single `offlineCacheDays` becomes `offlineEnvelopeDays` and
+`offlineBodyDays`; the design is independent of the concrete default values, which are a one-line
+settings change (§15 open question 1).
+
+This decision is what makes S9's missing C2 job and S2's unpinned sweep floor consequential rather
+than theoretical: a wide envelope window means a reconcile enumeration spans many cycles, and
+body-window changes become a distinct, user-reachable operation.
 
 ### 2.2 Module layout (for the implementer, not built here)
 
@@ -208,20 +256,24 @@ policy change, not a redesign.
 src/sync/
   engine.ts        orchestration: triggers, single-flight, cycle budget, phase reporting
   cursor.ts        cursor state machine + the advance rules of §7.5
-  apply.ts         PURE change application: (localState, changesPage, fetched) -> mutations
+  apply.ts         PURE change application: (localState, page, fetched) -> mutations
   coverage.ts      job B
-  bodies.ts        job C
+  bodies.ts        jobs C1 + C2
+  overlay.ts       PURE read-time local-mutation overlay (§5.6)
   retention.ts     window + MB cap policy, eviction
   errors.ts        classify() and the taxonomy of §7.1
-  store.ts         SyncStore interface (§9) + AsyncStorageSyncStore (v1 backend)
-  store-sqlite.ts  step 6, not now
+  states.ts        branded ChangesState / SnapshotState types (§3.2)
+  store.ts         SyncStore interface (§9)
+  store-sqlite.ts  the shipping backend (§9.2)
+  store-memory.ts  in-memory backend for unit tests
 src/stores/
   sync-status-store.ts   UI-facing status; supersedes the sync fields of offline-cache-store
 ```
 
-`apply.ts` being pure (no network, no storage, no Zustand) is a hard requirement: every rule in
-§5, §6.3 and §11 must be unit-testable without a JMAP server or a device. That is the only way
-the failure-mode table below becomes a test suite rather than a promise.
+`apply.ts` and `overlay.ts` being pure (no network, no storage, no Zustand) is a hard requirement:
+every rule in §5, §6.3 and §11 must be unit-testable without a JMAP server or a device. It is the
+only way the failure-mode table becomes a test suite rather than a promise. Per S11, the overlay is
+a **parameter** to the read path, never a store read from inside `apply()`.
 
 ---
 
@@ -242,187 +294,273 @@ type CursorType = 'Email' | 'Mailbox';
 interface SyncCursor {
   type: CursorType;
   jmapAccountId: JmapAccountId;
-  /** The `newState` of the last FULLY APPLIED /changes page. Never any other token. */
+  /** See §3.2: a ChangesState from this (type, jmapAccountId), or a seeded SnapshotState. */
   state: string;
   /** True when the last page reported hasMoreChanges — a drain is unfinished. */
   drainPending: boolean;
-  /** Set when the server invalidated us (cannotCalculateChanges / protocol violation). */
+  /** Set when the server invalidated us. Cleared only by a completed reconcile (§7.6). */
   invalidatedAt?: number;
-  invalidatedReason?: 'cannotCalculateChanges' | 'oldStateMismatch' | 'manual';
+  invalidatedReason?: 'cannotCalculateChanges' | 'oldStateMismatch' | 'corruptState' | 'manual';
+
+  // ── anti-wedge counters (S6): PER CURSOR, not per account ──
+  consecutiveFailures: number;
+  /** The sinceState that failed; escalation only counts failures at the same position. */
+  lastFailedState?: string;
+  /** Current rung of the maxChanges ladder (§7.7). */
+  maxChangesRung: 0 | 1 | 2 | 3;
+
   updatedAt: number;
 }
 
 interface CoverageState {
   jmapAccountId: JmapAccountId;
-  /** ISO. Oldest receivedAt for which the envelope tier is known-complete. */
+  /** ISO. Oldest receivedAt for which the ENVELOPE tier is known-complete. */
   coveredFrom: string | null;
-  /** ISO. Newest receivedAt reached by the initial scan; null once bootstrap is done. */
+  /** ISO. Ascending scan resume point; null when not scanning. */
   scanCursor: string | null;
-  /** The retention floor the scan is currently working toward (windowStart). */
+  /** The retention floor this scan is working toward. */
   targetFrom: string;
-  phase: 'never-run' | 'scanning' | 'complete';
+  /**
+   * S2 — the floor PINNED at reconcile start. The reconcile sweep deletes only against this
+   * value, never against a targetFrom that moved while the reconcile was running.
+   */
+  sweepFloor?: string;
+  /** Set when a retention widen arrived mid-reconcile and must be applied after the sweep. */
+  deferredTargetFrom?: string;
+  /** Durable trace of any tie-cluster skip taken by §6.1's last-resort rung. */
+  gapMarkers?: Array<{ from: string; to: string; reason: 'tie-cluster-skip'; at: number }>;
+  phase: 'never-run' | 'scanning' | 'reconciling' | 'complete';
   /** Progress, for the UI only. Never load-bearing. */
   seen: number;
+  consecutiveFailures: number;
   updatedAt: number;
 }
 
 interface BodyQueueEntry {
   emailId: string;
   jmapAccountId: JmapAccountId;
-  receivedAt: string;   // drives priority: newest first
-  attempts: number;
+  receivedAt: string;      // drives priority: newest first
+  attempts: number;        // NEVER reset by a re-enqueue (S12)
   lastError?: string;
   nextAttemptAt?: number;
 }
 
 interface AccountSyncState {
-  /** Bumped on every login/logout/purge for this account. Guards late writes (§8.3). */
-  epoch: number;
   schemaVersion: number;
-  cursors: SyncCursor[];          // keyed by (type, jmapAccountId)
-  coverage: CoverageState[];      // keyed by jmapAccountId
-  /** Set when a resync is owed but not yet finished. Data stays readable meanwhile (§7.6). */
+  cursors: SyncCursor[];      // keyed by (type, jmapAccountId)
+  coverage: CoverageState[];  // keyed by jmapAccountId
+  /** Sticky until a reconcile completes (§7.6). Survives restarts. */
   resyncRequired: boolean;
+  /** Rolling count + window start for the reconcile ceiling of §7.6.1. */
+  reconcilesInWindow: number;
+  reconcileWindowStartedAt: number;
+  /** Last observed retention floor, for the clock-jump guard of F44. */
+  lastWindowFloor?: string;
   lastCycle?: {
     startedAt: number; finishedAt?: number;
     outcome: 'ok' | 'partial' | 'failed' | 'abandoned';
+    /** True when ANY job committed something — drives the chaining rule of §10.3. */
+    madeProgress: boolean;
     error?: string;
   };
-  consecutiveFailures: number;
-  /** sinceState that failed last cycle; used by the anti-wedge escalation (§7.7). */
-  lastFailedState?: string;
 }
 ```
 
-Cursors are keyed by `(LocalAccountId, JmapAccountId, CursorType)`. **All three components are
-required.** `LocalAccountId` because the device can hold up to 5 accounts
-(`account-utils.ts:MAX_ACCOUNTS`). `JmapAccountId` because one JMAP session exposes the user's
-own account plus every shared/group account, and each carries its own independent state token —
-this is exactly why `email-store.ts:101-121` already keys `emailStates` this way. `CursorType`
-because RFC 8620 §5.2 state tokens are per-datatype: an Email state and a Mailbox state are
-different namespaces and are never interchangeable.
+`epoch` is deliberately **not** a field of `AccountSyncState` — see §8.3. It is owned by the
+registry, outside the per-account namespace, because it must be monotonic *across* a purge.
 
-### 3.2 What is deliberately *not* a cursor
+Cursors are keyed by `(LocalAccountId, JmapAccountId, CursorType)`. All three are required.
+`LocalAccountId` because the device holds up to 5 accounts (`account-utils.ts:MAX_ACCOUNTS`).
+`JmapAccountId` because one JMAP session exposes the user's own account plus every shared/group
+account, each with its own independent state token — exactly why `email-store.ts:101-121` already
+keys `emailStates` this way. `CursorType` because RFC 8620 §5.2 state tokens are per-datatype.
 
-- **`Email/get`'s `state`.** A later snapshot than the page we just applied; adopting it skips
-  changes (defect D4). Fetched values are used; the returned `state` is discarded.
-- **`Email/query`'s `queryState`.** Belongs to a specific filter+sort. The engine's coverage job
-  does not use `queryChanges`; the email-store's visible-list path owns `queryState` and keeps
-  it in its own store (`email-store.ts:169-173`). The two must not be mixed.
-- **The `newState` inside a pushed `StateChange`.** It is a *target*, not a starting point. Using
-  it as `sinceState` would skip everything between our cursor and it. See §10.4.
-- **`sessionState`.** Session-level; signals capability/account-set change (§11 F19), not data
-  change.
-- **Thread state.** v1 keeps no local Thread table; `threadId` on the envelope is enough for
-  local grouping. No `Thread/changes` cursor.
-- **`EmailDelivery`.** A push type only (RFC 8620 §7.1 / `push-notifications.ts:103`); there is
-  no `EmailDelivery/changes`. Wake signal only.
+**S1 — no whole-struct writes.** `AccountSyncState` is a *view*, not a write unit. Every mutation
+goes through a field-level patch on `SyncTxn` (§9.1) applied under a per-account mutex with
+read-merge-write. Revision 1's "write the cursor / coverage / flags last, as a single
+`AccountSyncState` blob" is withdrawn: it loses concurrent updates from outside the cycle. The
+concrete sequence it broke: a cycle loads the struct, the user taps *Clear cache* (which sets
+`resyncRequired = true` and wipes records), the cycle's end-of-cycle commit writes its stale copy
+back with `resyncRequired: false` and an advanced cursor — producing an empty record store with a
+live cursor and no resync pending, which is precisely the state §8.1 exists to make unreachable.
 
-### 3.3 Invariants
+### 3.2 Cursor provenance: two branded state types (S5)
 
-The design's correctness reduces to these. Every rule in §5–§8 exists to hold one of them, and
-the failure-mode table in §11 is the enumeration of attempts to break them.
+Revision 1's I2 ("only a `Foo/changes.newState` may become a cursor") was **false as stated** — the
+design's own bootstrap (§4.1) and reconcile (§7.6) seed cursors from a `Foo/get {ids: []}` `state`,
+which RFC 8620 §5.1 makes a perfectly legitimate cursor. Stating an invariant the design itself
+violates is how it gets bypassed at the one call site that matters, which is exactly D4's shape.
+The real property is about **ordering**, not source, and it now has structural teeth:
 
-- **I1 — cursor-last.** A cursor is written only *after* every record mutation implied by its
-  page is durable. Consequence: a crash re-delivers a page (at-least-once), never skips one.
-- **I2 — provenance.** A cursor's value is only ever a `newState` returned by the same
-  `Foo/changes` method for the same `(jmapAccountId, type)`. No other token, ever (closes D4).
-- **I3 — monotonic or invalidated.** A cursor moves forward through applied pages, or is
-  explicitly invalidated and rebuilt (§7.6). It is never cleared silently, and never rolled back.
+```ts
+/** From a Foo/changes response's `newState`. The only value the delta path may advance to. */
+export type ChangesState = string & { readonly __brand: 'ChangesState' };
+/** From a Foo/get response's `state`. A valid cursor ONLY under the ordering rule below. */
+export type SnapshotState = string & { readonly __brand: 'SnapshotState' };
+
+/** Only constructible by coverage/reconcile, and only together with a durable commitment
+ *  to enumerate. Carrying it is the proof that the ordering rule holds. */
+export interface EnumerationCommitment {
+  readonly jmapAccountId: JmapAccountId;
+  readonly snapshot: SnapshotState;
+  readonly targetFrom: string;
+}
+```
+
+- `SyncTxn.advanceCursor(key, next: ChangesState)` — the delta path's only cursor write. It cannot
+  accept a `SnapshotState`; the compiler rejects D4's shape at the call site.
+- `SyncTxn.seedCursor(key, commitment: EnumerationCommitment)` — writes the snapshot state *and*
+  the `CoverageState` (`phase: 'scanning' | 'reconciling'`, `targetFrom`, `sweepFloor`) in the same
+  transaction. A seed is therefore never durable without the durable commitment to enumerate that
+  justifies it.
+
+**The ordering rule (the real invariant, restated as I2 in §3.4):** a `Foo/get` `state` may become
+a cursor only when an enumeration that *starts after that state was captured* is durably committed
+to rebuild the record set the cursor describes. Wrappers in `src/api/email.ts` return the branded
+types (§12.1) so the distinction cannot be lost by passing a bare `string` around.
+
+Note what this does *not* forbid: a seeded cursor may go live for the delta path **immediately**,
+before its enumeration finishes (§7.6, per S9). The seeded state is the server's current state at
+capture, so changes after it are delivered correctly. What the enumeration provides is *history
+completeness*, and only the delete sweep depends on that.
+
+### 3.3 What is deliberately *not* a cursor
+
+- **`Email/get`'s `state` outside the §3.2 ordering rule** — see D4.
+- **`Email/query`'s `queryState`** — belongs to a specific filter+sort. The engine's coverage job
+  does not use `queryChanges`; the email-store owns `queryState` (`email-store.ts:169-173`).
+- **The `newState` inside a pushed `StateChange`** — a *target*, not a starting point. See §10.4.
+- **`sessionState`** — session-level; signals capability/account-set change (F19), not data change.
+- **Thread state** — v1 keeps no local Thread table; `threadId` on the envelope suffices. No
+  `Thread/changes` cursor.
+- **`EmailDelivery`** — a push type only (`push-notifications.ts:103`); there is no
+  `EmailDelivery/changes`. Wake signal only.
+
+### 3.4 Invariants
+
+Correctness reduces to these. Every rule in §5–§8 holds one of them; §11 is the enumeration of
+attempts to break them.
+
+- **I1 — cursor-last.** A cursor is written only *after* every record mutation implied by its page
+  is durable. A crash re-delivers a page (at-least-once), never skips one.
+- **I2 — cursor provenance is an ordering rule** (restated per S5). A cursor advances to a
+  `ChangesState` from the same `(jmapAccountId, type)`; it may be *seeded* from a `SnapshotState`
+  only inside an `EnumerationCommitment` whose enumeration starts after that snapshot. No other
+  value, from any other source, ever becomes a cursor.
+- **I3 — monotonic or invalidated.** A cursor moves forward through applied pages, or is explicitly
+  invalidated and rebuilt (§7.6). Never cleared silently, never rolled back.
 - **I4 — no silent write loss.** Every storage write either succeeds or raises. A failed write
   fails the cycle (closes D2).
 - **I5 — idempotent application.** Applying the same page twice yields the same local state.
-  Guaranteed by upsert-by-id + delete-if-exists, and by RFC 8620 §1.2 ids never being reused.
+  Guaranteed by upsert-by-id, delete-if-exists, and RFC 8620 §1.2 ids never being reused.
 - **I6 — account containment.** Every read and write is namespaced by `LocalAccountId`; every
   commit re-checks `(accountId, epoch)` before landing (closes D6).
 - **I7 — deletion provenance.** A local email record is deleted only by (a) `Email/changes`
-  `destroyed`, (b) retention eviction, (c) the reconciliation sweep of §7.6, or (d) account
-  purge. Never by inference from mailbox state (§5.5).
-- **I8 — no clock dependence.** No correctness property depends on the device clock. Server
-  `receivedAt` values order the store; the device clock only picks the retention window boundary
-  and backoff delays.
-- **I9 — bounded work.** Every loop (page drain, coverage scan, body queue) has an explicit
-  budget and terminates. No unbounded `while (hasMoreChanges)`.
-- **I10 — no wedge.** No error path can leave an account permanently unable to make progress.
-  Repeated non-transient failure escalates to resync (§7.7), which is always achievable from a
-  cold start.
+  `destroyed`, (b) retention eviction, (c) the reconcile sweep of §7.6 against its **pinned**
+  floor, or (d) account purge. Never by inference from mailbox state (§5.5).
+- **I8 — no cursor or ordering depends on the device clock** (narrowed per S16). Cursors are opaque
+  server strings; the coverage scan's resume point is a server `receivedAt`. The *retention
+  boundary* does read the device clock, so a large skew can move the window — bounded and
+  self-correcting, but not free, so F44 adds a jump guard. Revision 1's blanket "no correctness
+  impact" was too strong for a feature whose point is having mail while offline.
+- **I9 — bounded work.** Every loop has an explicit budget and terminates.
+- **I10 — no wedge.** No error path can leave an account permanently unable to progress. Repeated
+  non-transient failure escalates to reconcile (§7.7), always achievable from cold.
+- **I11 — sequential execution within an account** (new, per Part 3). Within a cycle the jobs run
+  strictly in sequence and a job's fetch→apply pair is never interleaved with another job's apply.
+  This is what keeps the three machines safely "independent"; §5.1 gives the timeline argument.
+  Running bodies concurrently "because it's separate state" is forbidden.
+- **I12 — field-level state writes only** (new, per S1). `AccountSyncState` is never written as a
+  whole struct. All mutations are field-level patches under a per-account mutex, read-merge-write.
+- **I13 — a corrupt state blob is a resync, not an empty cursor set** (new, per S15). If
+  `AccountSyncState` fails to parse, the engine sets `resyncRequired = true` and treats every cursor
+  as invalidated. Falling back to "no cursors" would leave a store full of unverified pre-existing
+  records that no sweep ever visits.
 
 ---
 
 ## 4. Bootstrap vs. steady state — the decision
 
-**Asked explicitly by the brief:** reuse `offline-sync.ts`'s bulk download for the initial sync
-and switch to `/changes` afterward, or replace it entirely?
-
 **Decision: replace the code, keep the shape.** The bootstrap remains a query-driven bulk scan —
-that is the right mechanism, because `/changes` structurally cannot deliver pre-existing mail —
-but it is rewritten as job B (`coverage.ts`) rather than reusing `runOfflineSync`. Three
-defects make the existing function unusable as-is, and all three are in the load-bearing part:
+`/changes` structurally cannot deliver pre-existing mail — but it is rewritten as job B rather than
+reusing `runOfflineSync`, because three defects sit in the load-bearing part:
 
-1. **No cursor capture.** `runOfflineSync` never obtains a state token. If it were followed by a
-   first `Email/changes` call, that call would need a `sinceState` taken *after* the scan
-   finished — and every change that happened *during* the scan (minutes, on a large mailbox)
-   would fall in the gap: not in the scan's result set, not in the change stream. Permanent,
-   silent hole. This is the classic snapshot-isolation bug and it is not fixable by adding a
-   line; it dictates the order of operations (§4.1).
-2. **Unstable, unresumable paging.** One 5000-id query with no paging. The obvious extension
-   (`position`) is wrong under concurrent change (§6.2), and neither form can resume after the
-   OS kills the app mid-scan — the next launch restarts from zero.
-3. **Wrong granularity.** It fetches full bodies for everything up front, so the MB cap
-   determines how many messages exist offline *at all*. With the tiering of §2.1 the envelope
-   scan is ~1 KB/message and the body fetch is a separate, evictable pass.
+1. **No cursor capture.** `runOfflineSync` never obtains a state token. A first `Email/changes`
+   after it would need a `sinceState` taken *after* the scan finished, so every change during the
+   scan (minutes on a large mailbox) falls in a gap: not in the scan's results, not in the change
+   stream. Permanent silent hole. Not fixable by adding a line — it dictates the order of
+   operations (§4.1).
+2. **Unstable, unresumable paging.** One 5000-id query. The obvious extension (`position`) is wrong
+   under concurrent change (§6.2), and neither form resumes after an OS kill.
+3. **Wrong granularity.** Full bodies up front, so the MB cap determines how many messages exist
+   offline at all.
 
-What is kept from it, deliberately: the `{days, maxMB}` policy shape, the chunk-to-
-`maxObjectsInGet` batching, the progress-to-store reporting that `OfflineCacheBanner` renders,
-and oldest-first eviction. Those are all fine.
+Kept deliberately: the `{days, maxMB}` policy shape, chunk-to-`maxObjectsInGet` batching, the
+progress reporting `OfflineCacheBanner` renders, and oldest-first eviction.
 
 ### 4.1 Bootstrap sequence (mandatory order)
 
 ```
 1. CAPTURE CURSORS FIRST, in one JMAP request, before touching any data:
-     ['Mailbox/get', {accountId, ids: []}, '0']     -> mailboxState
-     ['Email/get',   {accountId, ids: []}, '1']     -> emailState
-   Persist both as cursors with drainPending=false.
+     ['Mailbox/get', {accountId, ids: []}, '0']   -> SnapshotState (mailbox)
+     ['Email/get',   {accountId, ids: []}, '1']   -> SnapshotState (email)
+   Seed both via seedCursor(...) inside one EnumerationCommitment (§3.2), which in the
+   same transaction writes coverage {phase:'scanning', targetFrom, sweepFloor: targetFrom}.
    (Email/get with ids:[] returning a usable state token is already relied on by
    getEmailsWithState(); email.ts:329-336.)
 
 2. Full Mailbox/get -> upsert every mailbox row. Cheap, always complete, no paging.
 
-3. Coverage scan (§6.1): ascending keyset walk over the envelope window,
-   committing after each page and advancing CoverageState.scanCursor.
+3. The seeded cursors are LIVE from here: each subsequent cycle runs A1, A2 (delta) and
+   only then B (the ascending keyset scan of §6.1), per I11's ordering. Bootstrap does not
+   block delta sync, which matters now that the envelope window is wide (§2.1).
 
-4. Mark coverage.phase = 'complete', coveredFrom = targetFrom.
-
-5. Run a normal delta cycle. It replays everything that changed during steps 2-4.
+4. When the scan reaches targetFrom: coveredFrom = sweepFloor, phase = 'complete'.
+   (Bootstrap has no delete sweep — there is nothing local to sweep. Only reconcile sweeps.)
 ```
 
-Step 1 preceding step 3 is the whole point: the cursor is *older* than the data, so the first
-delta cycle re-delivers some changes we already have. That is I5 doing its job — a handful of
-redundant upserts is the correct price for a structurally gap-free handoff. The opposite order
-(scan, then capture) is cheaper and silently loses mail; it must not be "optimised" back in.
+Step 1 preceding step 3 is the point: the cursor is *older* than the data, so the first delta cycle
+re-delivers some changes we already have. That is I5 doing its job — a handful of redundant upserts
+is the correct price for a structurally gap-free handoff. The opposite order (scan, then capture) is
+cheaper and silently loses mail; it must not be "optimised" back in.
 
-Corollary for the reviewer: the engine must be able to serve reads during steps 2–4. The UI shows
-partial coverage (`OfflineCacheBanner` progress) and the offline list simply has less history
-than it eventually will. There is no "sync in progress, no data" state.
+The engine serves reads throughout: the UI shows partial coverage and the offline list simply has
+less history than it eventually will. There is no "sync in progress, no data" state.
 
 ---
 
 ## 5. Change application: order and consistency
 
-### 5.1 Order within a cycle
+### 5.1 Order within a cycle, and why it is safe (S16)
 
 ```
-1. Mailbox/changes  — drained fully (or to budget) before Email/changes.
-2. Email/changes    — drained page by page.
-3. Bodies           — queue drain, lowest priority, may be cut by the cycle budget.
+A1. Mailbox/changes  — drained fully (or to budget)
+A2. Email/changes    — drained page by page
+B.  Coverage         — envelope scan / reconcile enumeration
+C1. Body queue drain
+C2. Body backfill
 ```
 
-Mailbox first because folder rows are what the list UI resolves names and roles against, and
-because a `created` mailbox should exist locally before envelopes referencing it land. This is
-an ordering *preference*, not a correctness dependency — see §5.5 and §9.3: the schema must not
-enforce a foreign key from email→mailbox, because the two change streams are not transactionally
-coupled and either order can be observed. A design that needs the FK is a design that breaks the
-first time a message arrives in a mailbox we haven't fetched yet.
+Mailbox before Email because folder rows are what the list UI resolves names and roles against, and
+because a `created` mailbox should exist locally before envelopes referencing it land. This is a
+*preference*, not a correctness dependency — §9.3's schema deliberately has no email→mailbox FK,
+because the two streams are not transactionally coupled and either order can be observed.
+
+Delta before coverage **is** load-bearing, and revision 1 left the reason implied. The hazard is
+resurrection: coverage's query returns message X, X is destroyed server-side, delta reports it
+`destroyed`, and if coverage's page were applied *after* that delete, X returns as a zombie no
+future `/changes` page will ever re-report. Walking the timeline:
+
+- **Coverage after delta** (the specified order): coverage's query executes after the delete was
+  applied, and a JMAP query reflects current server state, so X cannot be returned. Safe.
+- **Coverage before delta**: coverage applies X while it is still alive; the later `/changes` call
+  reports the destroy and we delete it. Safe.
+
+So either order is safe — **provided a job's query→apply pair is never interleaved with another
+job's apply**, which is exactly I11. The unsafe configuration is not an ordering choice but
+concurrency, and that is what I11 forbids. Belt-and-braces for the same class of bug: a body write
+is conditional on its envelope still existing (§9.1), so a body fetched just before its envelope
+was destroyed cannot land as an orphan (F48).
 
 ### 5.2 `Mailbox/changes` application
 
@@ -433,104 +571,112 @@ first time a message arrives in a mailbox we haven't fetched yet.
 | `updated`, `updatedProperties` null | `Mailbox/get` full object → upsert row. |
 | `destroyed` | Delete the mailbox row **only**. Do not touch email records (I7). |
 
-The `updatedProperties` optimisation is RFC 8621 §2.2: *"If only the `totalEmails`,
-`unreadEmails`, `totalThreads`, and/or `unreadThreads` Mailbox properties have changed since the
-old state, this will be the list of properties that may have changed"*, and *"If the server is
-unable to tell whether only counts have changed, it MUST just be null."* Counts change on every
-delivery and every read, so on a busy account this is the difference between patching four
-integers and re-fetching every folder object repeatedly. Note the wording is "may have changed" —
-so the returned list is an upper bound, and patching exactly those columns is correct.
+The optimisation is RFC 8621 §2.2: *"If only the `totalEmails`, `unreadEmails`, `totalThreads`,
+and/or `unreadThreads` Mailbox properties have changed since the old state, this will be the list of
+properties that may have changed"*, and *"If the server is unable to tell whether only counts have
+changed, it MUST just be null."* Counts change on every delivery and every read, so on a busy
+account this is the difference between patching four integers and re-fetching every folder object.
+"May have changed" makes the list an upper bound, so patching exactly those columns is correct.
 
-`MailboxChangesResult` (`email.ts:125-132`) does not currently surface `updatedProperties`;
-§12.1 adds it.
+`MailboxChangesResult` (`email.ts:125-132`) does not surface `updatedProperties`; §12.1 adds it.
 
 ### 5.3 `Email/changes` application — the important one
 
-The brief asks what must be re-fetched on an `updated` id versus inferred. The answer is fixed
-by RFC 8621 §4.1: **`keywords` and `mailboxIds` are the only mutable Email properties.**
-Everything else — body structure, body values, attachments, headers, `receivedAt`, `size`,
-`threadId`, `preview`, `subject`, addresses, `hasAttachment` — is immutable for the lifetime of
-the id. An `updated` Email therefore *cannot* have a changed body, and re-fetching one is pure
-waste.
+Fixed by RFC 8621 §4.1: **`keywords` and `mailboxIds` are the only mutable Email properties.** Body
+structure, body values, attachments, headers, `receivedAt`, `size`, `threadId`, `preview`,
+`subject`, addresses and `hasAttachment` are immutable for the lifetime of the id. An `updated`
+Email therefore *cannot* have a changed body, and re-fetching one is pure waste.
 
 | Result | Fetch | Notes |
 |---|---|---|
-| `created` | `Email/get {properties: EMAIL_LIST_PROPERTIES}` | Envelope tier. Enqueue into `body_queue` **iff** in the body window. Never fetch bodies inline. |
-| `updated` | `Email/get {properties: ['id','keywords','mailboxIds']}` | 3 properties. Never bodies. Patch in place; the existing body blob stays valid. |
+| `created` | `Email/get {properties: EMAIL_LIST_PROPERTIES}` | Envelope tier. Enqueue into `body_queue` **iff** inside the body window. Never fetch bodies inline. |
+| `updated`, record present locally | `Email/get {properties: ['id','keywords','mailboxIds']}` | 3 properties. Never bodies. Patch in place; the existing body blob stays valid. |
+| `updated`, record **absent** locally | **nothing** (S16) | Unconditional no-op. Filter absent ids out *before* issuing the fetch — cheaper, and it removes revision 1's F26 wording, which implied fabricating a `receivedAt` the 3-property response cannot supply and the schema's `NOT NULL` would reject. |
 | `destroyed` | nothing | Delete envelope + body + membership rows + any `body_queue` entry. |
 
-There is no `updatedProperties` on `Email/changes` (RFC 8621 §4.3 is a plain `/changes` method),
-so a fetch is unavoidable for `updated` — but a 3-property one, batched to `maxObjectsInGet`.
-This single rule is the largest efficiency difference from today, and closes D1: cached
-read/unread and folder membership now actually track the server.
+Absent-and-updated is safe to ignore because absence is always either "retention decided against
+it" or "coverage hasn't reached it yet" — and coverage enumerates *current* state, so it will pick
+the record up with the updated values anyway. Nothing needs the update replayed.
 
-Batching: `created` and `updated` ids from a page are fetched in **two separate**
-`Email/get` calls (different `properties` sets), each chunked to
-`min(maxObjectsInGet, 200)`. Both may be packed into one JMAP request when within
-`maxCallsInRequest` (`jmap-client.ts:462-467`).
+There is no `updatedProperties` on `Email/changes` (RFC 8621 §4.3 is a plain `/changes` method), so
+a fetch is unavoidable for present `updated` ids — but a 3-property one, batched to
+`maxObjectsInGet`. This is the largest efficiency difference from today and closes D1.
 
-`notFound`: an id in `created`/`updated` that `Email/get` omits was destroyed between the two
-calls. This is normal, not an error: skip the id, do not retry, do not fail the page. A
-subsequent page (or cycle) will carry the `destroyed` entry; if it never does, the record was
-never stored, so there is nothing inconsistent.
+Batching: `created` and `updated` ids from a page go in **two** `Email/get` calls (different
+`properties` sets), each chunked to `min(maxObjectsInGet, 200)`, packed into one JMAP request when
+within `maxCallsInRequest` (`jmap-client.ts:462-467`).
+
+`notFound`: an id in `created`/`updated` that `Email/get` omits was destroyed between the two calls.
+Normal, not an error: skip it, no retry, do not fail the page.
 
 ### 5.4 Ordering within one page
 
-RFC 8620 §5.2 permits overlap between the arrays: *"If a record has been created AND updated
-since the old state, the server SHOULD just return the id in the `created` list but MAY return it
-in the `updated` list as well"*, and the same for updated+destroyed → `destroyed`. Created+
-destroyed *"SHOULD"* be omitted entirely but is not forbidden.
+RFC 8620 §5.2 permits overlap: *"If a record has been created AND updated since the old state, the
+server SHOULD just return the id in the `created` list but MAY return it in the `updated` list as
+well"*, and the same for updated+destroyed → `destroyed`. Created+destroyed *SHOULD* be omitted
+entirely but is not forbidden.
 
-**Rule: within a page, apply creates, then updates, then destroys.** Because ids are never
-reused (RFC 8620 §1.2 — *"All record ids are assigned by the server and are immutable"*), a
-destroy always refers to the same record as any create/update of that id in the same page, so
-destroy-last converges on the correct final state (gone). The reverse order would resurrect a
-dead id, spend a fetch on it, and get `notFound`.
+**Rule: within a page, apply creates, then updates, then destroys.** Because ids are never reused
+(RFC 8620 §1.2), a destroy always refers to the same record as any create/update of that id in the
+same page, so destroy-last converges on the correct final state. The reverse order would resurrect a
+dead id, spend a fetch, and get `notFound`.
 
-**Pages are applied strictly in order, and a page is applied exactly once before its cursor is
-written.** An id created in page 1 and destroyed in page 3 must be seen in that sequence; there
-is no reordering, batching across pages, or parallel page application.
+**Pages are applied strictly in order, exactly once, before their cursor is written.** No
+reordering, no cross-page batching, no parallel page application.
 
 ### 5.5 Mailbox/Email interaction
 
-The two streams are independent, so transiently inconsistent local states are normal and must be
-tolerated rather than repaired:
+The streams are independent, so transiently inconsistent local states are normal and must be
+tolerated, not repaired:
 
-- **Envelope references a mailbox row we don't have** (email applied before its mailbox): keep
-  the membership row. The folder simply doesn't appear in the sidebar until `Mailbox/changes`
-  catches up, at which point the messages are already there. No FK, no cascade (§9.3).
-- **Mailbox destroyed, its emails still local**: delete only the mailbox row (§5.2). If the
-  server destroyed the messages too (JMAP `onDestroyRemoveEmails`), `Email/changes` will report
-  them `destroyed` and I7's path (a) removes them. If the server moved them instead, their
-  `mailboxIds` update arrives via `updated`. Either way the truth arrives on the Email stream.
-- **A record whose `mailboxIds` becomes empty**: keep it. Do not infer deletion. It is reachable
-  by id (notification tap, thread view) and will be reported `destroyed` if it truly is gone.
-  Hiding it from folder listings falls out naturally — no membership rows, no listing hits.
+- **Envelope references a mailbox row we don't have:** keep the membership row. The folder appears
+  when `Mailbox/changes` catches up; the messages are already there. No FK, no cascade (§9.3).
+- **Mailbox destroyed, its emails still local:** delete only the mailbox row. If the server
+  destroyed the messages too (`onDestroyRemoveEmails`), `Email/changes` reports them `destroyed`. If
+  it moved them, their `mailboxIds` update arrives as `updated`. Truth arrives on the Email stream
+  either way.
+- **A record whose `mailboxIds` becomes empty:** keep it. It is reachable by id (notification tap,
+  thread view) and will be reported `destroyed` if it truly is gone. It falls out of folder listings
+  naturally — no membership rows, no listing hits.
 
-This is I7 stated operationally: **email records are never deleted by inference.** The cost of
-being wrong in that direction is a stale row that the next cycle cleans up. The cost of being
-wrong in the other direction is a message the user cannot read while offline — which is the
-exact failure this whole feature exists to prevent.
+This is I7 operationally: **email records are never deleted by inference.** Being wrong in that
+direction costs a stale row the next cycle cleans up. Being wrong in the other direction costs a
+message the user cannot read while offline — the exact failure this feature exists to prevent.
 
-### 5.6 Interaction with the offline outbox
+### 5.6 Local mutations: a read-time overlay, not a write-through (S11, revised)
 
-`outbox-store.ts` may hold unflushed local intent (`keywords` / `mailboxes` / `destroy`), all
-expressed as **full-state assignments** and therefore idempotent by construction (that store's
-own header documents this). Naively applying a server `updated` would visibly revert the user's
-offline change.
+Revision 1 had the engine re-apply pending outbox ops on top of each delta, and named no owner for
+writing optimistic mutations into the durable store — leaving a reachable sequence that loses a
+local mutation silently until restart. Rather than making that write-through atomic, **revision 2
+removes the write path**:
 
-**Rule:** after applying a delta to record `X`, if the outbox holds pending ops for
-`(jmapAccountId, X)`, re-apply those ops' target state on top of the freshly-written server
-state, in queue order. Server truth is the base; unflushed local intent is the overlay. When the
-outbox later flushes, the server converges to the same value, and the resulting `Email/changes`
-`updated` is then a no-op patch.
+- **The durable store holds server-derived state only.** Nothing optimistic is ever written into
+  `envelope`/`body`.
+- **`src/stores/outbox-store.ts` remains the sole durable record of local intent.** It already
+  persists before the UI reports success, and its ops are full-state assignments and therefore
+  idempotent (its own header documents this).
+- **Reads compose the two**: `overlay.ts` exports a pure
+  `applyPendingOps(record, pendingOps) → record`, and every read path that feeds the UI passes the
+  account's pending ops through it. A queued `destroy` hides the record from reads.
+- **`apply()` never sees pending ops.** They are not a parameter to change application at all, so
+  the delta path has no way to be wrong about them.
 
-A pending `destroy` for `X` means the record is doomed: apply the server state, do not enqueue a
-body fetch for it, and let the flush + subsequent `destroyed` remove it.
+Why this is better than the review's suggested atomic write-through: it needs no cross-store
+transaction (the outbox is a separate AsyncStorage bucket today), it cannot lose a mutation because
+the only durable copy is the one the outbox already wrote, and it deletes the "delta reverts the
+user's offline change" failure mode instead of guarding it — after a flush the server converges and
+the op leaves the queue, so the overlay disappears on its own.
+
+Accepted cost, stated: local list *queries* (e.g. an offline unread filter) see server truth, so a
+predicate over locally-mutated keywords needs the overlay applied after the query rather than inside
+it. Badge counts and list rows apply it; SQL-level filtering on `keywords` does not reflect
+unflushed intent. That is a small, visible, correct-by-construction limitation rather than a
+silent-loss risk.
+
+§12.3 records the consequence: `email-store.ts:38-41`'s `patchCache()` write-through is deleted, not
+ported.
 
 ### 5.7 Boundary with `email-store`
-
-They serve different consumers and must not share state:
 
 | | Engine (this design) | `email-store` |
 |---|---|---|
@@ -538,17 +684,15 @@ They serve different consumers and must not share state:
 | Scope | whole account (all mailboxes, retention window) | one mailbox, one page, current filter |
 | Lifetime | survives restart, drives offline reads | in-memory + persisted view snapshot |
 
-Direction of information flow is **engine → email-store only**: the engine notifies
-"account X changed" and the email-store decides whether the visible list needs a refresh (it
-already has `handleStateChange`, `email-store.ts:969-1003`). The engine never reads the
-email-store's `queryState` or `emailStates`, and vice versa. Two independent cursors over the
-same server data is intentional redundancy, not duplication to be factored away — they page
+Information flows **engine → email-store only**: the engine notifies "account X changed" and the
+email-store decides whether the visible list needs a refresh (it already has `handleStateChange`,
+`email-store.ts:969-1003`). The engine never reads the email-store's `queryState` or `emailStates`,
+and vice versa. Two independent cursors over the same data is intentional redundancy: they page
 differently, invalidate differently, and one being wrong must not corrupt the other.
 
 `selectMailbox`'s cache seeding (`email-store.ts:646-663`) and `refreshEmails`'s offline fallback
-(`:941-961`) keep working, reading through the new `SyncStore` instead of
-`offline-cache-store.getEmailsInMailbox` — with the indexed query of §9.3 replacing the O(n)
-scan (D3).
+(`:941-961`) keep working, reading through `SyncStore` — subject to §9.5's rule that a disabled
+account's store is never opened.
 
 ---
 
@@ -566,98 +710,102 @@ page: Email/query {
   calculateTotal: false        // total is unstable and unused
 }
 -> Email/get envelope tier for the returned ids
--> commit: upsert envelopes, enqueue in-window bodies,
+-> commit: upsert envelopes, enqueue in-body-window bodies,
            set scanCursor = max(receivedAt) of the committed page
 ```
 
 Ascending is the correct direction for a backfill: new mail arrives at the *tail*, so insertions
-never shift rows the scan has already passed. `scanCursor` is a server-provided `receivedAt`
-(I8), so it is a meaningful resume point after a kill — the next launch continues from the last
-committed page rather than restarting (fixing bootstrap defect 2 in §4).
+never shift rows the scan has passed. `scanCursor` is a server-provided `receivedAt` (I8), so it is a
+meaningful resume point after a kill.
 
-Ties on `receivedAt` are the only hazard: a filter of `{after: scanCursor}` is exclusive at the
-boundary in some server implementations and inclusive in others, which risks either skipping a
-tie-cluster member or looping on one. Mitigations, in order:
-1. Dedupe by id on commit (upserts are free, I5), so re-delivery is harmless.
-2. **No-forward-progress guard**: if a page's `max(receivedAt)` does not exceed the incoming
-   `scanCursor` *and* every returned id is already stored, advance using the `anchor` /
-   `anchorOffset` arguments of `Foo/query` (RFC 8620 §5.5, inherited by `Email/query`,
-   RFC 8621 §4.4) from the last id of the page for one page, then resume keyset.
-3. If the anchor is rejected (`anchorNotFound`), advance `scanCursor` by 1 ms and continue,
-   recording a warning. A one-millisecond tie-cluster larger than 200 messages is a corrupt
-   server, not a case to design for.
+**`after` is inclusive — this is specified, not implementation-defined (S14).** RFC 8621 §4.4.1:
+*"The `receivedAt` date-time of the Email must be the same or after this date-time to match the
+condition."* (`before` is exclusive: *"must be before this date-time"*.) Revision 1's hedge
+("exclusive in some implementations") was wrong and is withdrawn. Consequences:
 
-The UI-facing progress (`seen`) is best-effort and explicitly not load-bearing.
+1. Every page after the first re-returns the boundary message(s). Expected; dedupe by id on commit
+   makes it free (I5).
+2. Forward progress therefore requires `max(receivedAt) > scanCursor` **strictly**. A page whose
+   every row shares one millisecond makes no progress.
+3. **No-forward-progress guard**, in order:
+   - Retry the page using the `anchor` / `anchorOffset` arguments of `Foo/query` (RFC 8620 §5.5,
+     inherited by `Email/query`, RFC 8621 §4.4) from the last id of the previous page, for one page,
+     then resume keyset.
+   - If the anchor is rejected (`anchorNotFound`), **only then**: advance `scanCursor` by 1 ms, emit
+     a `WARN`, and record a durable **gap marker** (`CoverageState.gapMarkers`). This rung can skip
+     messages sharing the boundary millisecond on a conforming server, so it is never normal-path
+     behaviour, is always logged, and leaves a recorded trace so a support question has an answer.
+     A >200-message single-millisecond cluster is a corrupt server, not a case to design for.
 
-`DISCOVERY_LIMIT` (5000) is replaced by two real bounds: the retention window (`targetFrom`) and
-a per-cycle page budget (§6.4). A hard id cap is the wrong control — it silently truncates
-history with no record of where truncation happened.
+`DISCOVERY_LIMIT` (5000) is replaced by two real bounds: the retention window (`targetFrom`) and a
+per-cycle page budget (§6.4). A hard id cap is the wrong control — it truncates history silently
+with no record of where.
 
 ### 6.2 Why not `position`-based paging
 
-`Email/query {position: n}` over a mailbox that is receiving mail shifts every subsequent page by
-the number of insertions ahead of it. With descending sort, one delivery between page 1 and
-page 2 pushes one message from the boundary of page 1 into page 2's start — and one *out* of the
-scan's reach entirely. That message is pre-existing relative to our cursor, so `Email/changes`
-will never report it: it is a permanent hole in the local store with no signal that it exists.
-
-This is the trap referenced as D8 — today's single unpaged query hides it; the natural "add
-paging" fix introduces it. Keyset ascending is immune by construction.
+`Email/query {position: n}` over a mailbox receiving mail shifts every later page by the number of
+insertions ahead of it. With descending sort, one delivery between page 1 and page 2 pushes one
+message from page 1's boundary into page 2's start — and one *out* of the scan's reach entirely.
+That message is pre-existing relative to our cursor, so `Email/changes` will never report it: a
+permanent hole with no signal that it exists. This is D8; keyset ascending is immune by
+construction.
 
 ### 6.3 Delta drain and mid-drain crash recovery (job A)
 
 ```
 drain(type, jmapAccountId):
-  budget = pagesRemaining()                          # I9
+  budget = pagesRemaining()                             # I9
   loop:
-    if budget-- <= 0: mark cursor.drainPending = true; return PARTIAL
-    res = Foo/changes { accountId, sinceState: cursor.state, maxChanges: MAXC }
+    if budget-- <= 0: patch cursor.drainPending = true; return PARTIAL
+    res = Foo/changes { accountId, sinceState: cursor.state,
+                        maxChanges: rungValue(cursor.maxChangesRung) }
 
-    if res is error:  -> §7 classification. Cursor unchanged. Return.
-    if res.oldState != cursor.state:                  # protocol violation
-        -> invalidate cursor, resyncRequired = true (§7.6). Return.
+    if res is error:  -> §7 classification. Cursor position unchanged. Return.
+    if res.oldState != cursor.state:  -> §7.6.1 (re-issue once, then reconcile). Return.
 
     apply(res)          # §5.3/§5.4; may commit records partially (§7.4)
-    commit { records..., cursor.state = res.newState,
-             cursor.drainPending = res.hasMoreChanges }   # cursor LAST (I1)
-
+    commit {
+      records...,
+      advanceCursor(key, res.newState as ChangesState),  # LAST (I1), branded (I2)
+      patch cursor { drainPending: res.hasMoreChanges,
+                     consecutiveFailures: 0, lastFailedState: undefined,
+                     maxChangesRung: 0 }
+    }
     if !res.hasMoreChanges: return OK
 ```
 
-`MAXC = min(maxObjectsInGet, 500)`. Bounding `maxChanges` keeps a single page's fetch inside one
-`Email/get` batch, so a page is a small, quickly-committable unit — which is precisely what makes
-crash recovery cheap.
+`rungValue(0) = min(maxObjectsInGet, 500)`. Bounding `maxChanges` keeps a page's fetch inside one
+`Email/get` batch, so a page is a small, quickly-committable unit — which is what makes crash
+recovery cheap.
 
-**Crash / OS-kill mid-drain.** By I1, the last durable cursor is the `newState` of the last
-*fully applied* page. On next launch:
+**Crash / OS-kill mid-drain.** By I1 the last durable cursor is the `newState` of the last *fully
+applied* page. On next launch:
 
-1. `AccountSyncState` loads; `cursor.drainPending === true` tells the engine a drain was cut
-   short, so the next cycle is scheduled immediately rather than waiting for a trigger.
-2. The interrupted page is re-requested with the same `sinceState` and re-applied. By I5 this is
-   a no-op for everything that had already been written, and completes what hadn't.
-3. Worst case cost: one page (≤500 ids of 3-property or envelope data) refetched.
+1. `AccountSyncState` loads; `drainPending === true` says a drain was cut short, so the next cycle is
+   scheduled immediately (T9) rather than waiting for a user trigger.
+2. The interrupted page is re-requested with the same `sinceState` and re-applied. By I5 that is a
+   no-op for everything already written and completes what wasn't.
+3. Worst case: one page (≤500 ids of 3-property or envelope data) refetched.
 
-RFC 8620 §5.2's intermediate-state guarantee is what makes this work: when `hasMoreChanges` is
-true, the returned `newState` is a state the client may pass back as `sinceState` to continue.
-So persisting intermediate states is sanctioned, not a trick — and it is the only reason
-crash recovery costs one page instead of a whole resync.
+RFC 8620 §5.2's intermediate-state guarantee is what makes this work: when `hasMoreChanges` is true
+the returned `newState` may be passed back as `sinceState`. Persisting intermediate states is
+sanctioned, and it is the only reason crash recovery costs one page instead of a resync.
 
-Note `drainPending` is a hint, never a correctness input: an engine that ignored it would still
-be correct, just lazier. Nothing branches on it except scheduling.
+`drainPending` is a scheduling hint, never a correctness input.
 
 ### 6.4 Budgets (I9)
 
 | Bound | Foreground | Background (later) |
 |---|---|---|
-| Pages per cycle, per type | 40 | 8 |
+| Pages per cycle, per cursor | 40 | 8 |
 | Wall clock per cycle | 90 s soft deadline, checked between pages | 25 s |
-| Body queue items per cycle | 200 | 20 |
+| Body queue items per cycle (C1+C2) | 200 | 20 |
 | Coverage pages per cycle | 25 | 5 |
 
-Exceeding a budget is a **normal** outcome (`outcome: 'partial'`), not an error: cursor stands at
-the last committed page, `drainPending` stays true, next trigger resumes. This is also the
-answer to a server whose `hasMoreChanges` never goes false (§11 F14) — the loop cannot spin
-forever, and it cannot wedge either, because progress is committed each page.
+Exceeding a budget is a **normal** outcome (`partial`), not an error: the cursor stands at the last
+committed page, `drainPending` stays true, T9 resumes. This is also the answer to a server whose
+`hasMoreChanges` never goes false (F14) — the loop cannot spin forever and cannot wedge, because
+progress is committed every page.
 
 ---
 
@@ -665,159 +813,208 @@ forever, and it cannot wedge either, because progress is committed each page.
 
 ### 7.1 Taxonomy
 
-JMAP reports failure at three layers, and the current client flattens all of them (D5, and
-`jmap-client.ts:442-445` throwing a bare `Error` for any non-2xx). The engine needs them
-distinct:
+JMAP reports failure at three layers and the current client flattens all of them (D5, and
+`jmap-client.ts:442-445` throwing a bare `Error` for any non-2xx):
 
 | Class | Examples | Retry | Cursor |
 |---|---|---|---|
 | **Transport** | offline, DNS, TLS, socket reset, timeout, RN `TypeError: Network request failed` | yes, backoff | unchanged |
-| **RateLimit** | HTTP 429 + `Retry-After` (already `RateLimitError`, `jmap-client.ts:436-440`); request-level `urn:ietf:params:jmap:error:limit` with `limit: "rateLimit"` (RFC 8620 §3.6.1) | yes, honour `Retry-After`/backoff | unchanged |
+| **RateLimit** | HTTP 429 + `Retry-After` (already `RateLimitError`, `jmap-client.ts:436-440`); request-level `urn:ietf:params:jmap:error:limit` with `limit: "rateLimit"` (RFC 8620 §3.6.1) | yes, honour `Retry-After` | unchanged |
 | **ServerTransient** | HTTP 5xx; method-level `serverUnavailable`, `serverFail`, `serverPartialFail` (RFC 8620 §3.6.2) | yes, ≤2 attempts, then abandon cycle | unchanged |
-| **RequestLimit** | `urn:ietf:params:jmap:error:limit` with `maxSizeRequest` / `maxCallsInRequest` / `maxObjectsInGet` overrun; method-level `requestTooLarge` | yes, once, with halved batch size | unchanged |
+| **RequestLimit** | `urn:…:error:limit` with `maxSizeRequest`/`maxCallsInRequest`; method-level `requestTooLarge` (RFC 8620 §5.1 — *"the number of ids requested by the client exceeds the maximum"*) | yes, once, with halved batch size | unchanged |
 | **Auth** | HTTP 401 after the client's own refresh retry → `AuthenticationError` | no | unchanged |
 | **Fatal** | `invalidArguments`, `unknownMethod`, `accountNotFound`, `accountNotSupportedByMethod`, `forbidden` | no | unchanged |
-| **StateInvalid** | `cannotCalculateChanges`; `oldState !== sinceState` | no (goes to resync) | **invalidated** (§7.6) |
+| **StateInvalid** | `cannotCalculateChanges`; confirmed `oldState` mismatch; corrupt state blob (I13) | no (goes to reconcile) | **invalidated** (§7.6) |
 
-Note there is exactly one row in which the cursor moves on failure, and that row's action is a
-full, verified rebuild. Everywhere else, **failure means the cursor stands still**, which is what
-makes "a failure never causes silent data loss" a structural property rather than a hope.
+Exactly one row moves the cursor, and its action is a full verified rebuild. Everywhere else
+**failure means the cursor stands still**, which is what makes "a failure never causes silent data
+loss" structural rather than aspirational.
 
-`tooManyRequests` as a method-level error type is not in RFC 8620 §3.6.2's registry, but servers
-do return non-standard method error types; `classify()` therefore has a default rule: **an
-unrecognised method-level error type is ServerTransient, not Fatal and never StateInvalid.**
-Guessing "transient" costs a retry and a delayed sync; guessing "state invalid" costs a full
-resync; guessing "fatal" costs a stalled account. The cheapest wrong answer wins the default.
+An **unrecognised** method-level error type is **ServerTransient**, not Fatal and never
+StateInvalid. Guessing transient costs a retry; guessing state-invalid costs a full resync; guessing
+fatal stalls the account. The cheapest wrong answer wins the default.
 
 ### 7.2 Backoff
 
 Full-jitter exponential: `delay = random(0, min(cap, base * 2^attempt))`, `base = 1 s`,
-`cap = 60 s` foreground / `15 min` background. Max 4 attempts per operation within a cycle, then
-the cycle ends with `outcome: 'failed'` and `consecutiveFailures++`. A `Retry-After` value always
-overrides the computed delay when larger. Cycle-level scheduling then follows §7.7.
+`cap = 60 s` foreground / `15 min` background. Max 4 attempts per operation within a cycle, then the
+cycle ends `failed` and the *cursor's* `consecutiveFailures` increments (§7.7). A `Retry-After`
+always overrides a smaller computed delay.
 
-Jitter matters here specifically because §10 has five independent triggers, up to five accounts,
-and a network-recovery trigger that fires on every account simultaneously — the exact shape that
-produces a synchronized retry stampede against one Stalwart instance.
+Jitter matters because §10 has multiple independent triggers, up to five accounts, and a
+network-recovery trigger that fires for everything at once — the exact shape that produces a
+synchronised stampede against one Stalwart instance.
 
 ### 7.3 Offline is not an error
 
-If `network-store.online` is false, or `jmapClient` has no live session
-(`auth-store` keeps `session: null` in the authenticated-but-offline state,
-`auth-store.ts:502-514`), a cycle **does not start**: outcome `abandoned`, no
-`consecutiveFailures` increment, no error surfaced to the UI (the existing `OfflineBanner`
-already tells the user). Same for the app being backgrounded before a cycle begins.
+If `network-store.online` is false, or `jmapClient` has no live session (`auth-store` keeps
+`session: null` in the authenticated-but-offline state, `auth-store.ts:502-514`), a cycle **does not
+start**: outcome `abandoned`, no failure counters touched, no error surfaced (`OfflineBanner`
+already tells the user). Same for the app backgrounding before a cycle begins.
 
 ### 7.4 Partial-failure semantics inside a page
 
-The unit of atomicity is the *cursor*, not the *record set*:
+The unit of atomicity is the *cursor*, not the record set:
 
 - **Records may be committed partially.** If the `created` batch succeeds and the `updated` batch
-  fails, the created envelopes stay written. They are correct data; discarding them would be
-  wasted bandwidth. By I5 the replay overwrites them with identical values.
-- **The cursor advances only when the entire page has been applied.** One failed batch → cursor
-  unchanged → the whole page replays next cycle.
-- **Body fetch failures never affect the cursor.** Job C is separate state (§2). A body that
-  fails increments `BodyQueueEntry.attempts` and sets `nextAttemptAt` with the same backoff;
-  after 5 attempts the entry is dropped and the message stays envelope-only (openable online,
-  shows a "not downloaded" state offline). This is a degradation, not a data-loss: the envelope
-  is intact and the id is known.
-- **Storage write failure is fatal for the cycle** (I4). Cursor unchanged, `outcome: 'failed'`,
-  error surfaced. Never warn-and-continue (D2).
+  fails, the created envelopes stay written — correct data; discarding it would waste bandwidth. I5
+  makes the replay overwrite them identically.
+- **The cursor advances only when the entire page is applied.** One failed batch → cursor unchanged
+  → the page replays.
+- **Body failures never affect a cursor.** C1/C2 are separate state. A failed body increments
+  `attempts` and sets `nextAttemptAt` with the same backoff; after 5 attempts the entry is
+  **dequeued** and the message stays envelope-only (openable online, marked not-downloaded offline).
+  Per S12: `notFound` dequeues **immediately** (the message is gone; a queue entry for it can never
+  succeed and would otherwise burn five attempts), and a later re-enqueue is **insert-or-ignore that
+  never resets `attempts`** — otherwise C2 re-enqueuing a permanently failing body would defeat the
+  give-up rule and retry it forever.
+- **Storage write failure is fatal for the cycle** (I4). Cursor unchanged, `failed`, surfaced. Never
+  warn-and-continue (D2).
 
 ### 7.5 Cursor-advance rules, stated as one list
 
-Because this is the property the reviewer will attack hardest:
-
-1. A cursor advances **only** to a `newState` returned by a `Foo/changes` response for the same
-   `(jmapAccountId, type)` (I2).
-2. It advances **only after** all record mutations from that page are durable (I1).
-3. It advances **on an empty page** (`created`/`updated`/`destroyed` all empty, `newState`
-   differing) — that is a legitimate no-op advance and skipping it would re-request forever.
-4. It does **not** advance on any error class except StateInvalid, where it is invalidated and
+1. A cursor advances **only** to a `ChangesState` returned by `Foo/changes` for the same
+   `(jmapAccountId, type)`, via `advanceCursor` (§3.2). The type system rejects anything else.
+2. It may be **seeded** from a `SnapshotState` only inside an `EnumerationCommitment` whose
+   enumeration starts after that snapshot and is durably committed in the same transaction (I2).
+   This is the bootstrap/reconcile path and nothing else.
+3. It advances only after all record mutations from that page are durable (I1).
+4. It advances **on an empty page** (all three arrays empty, `newState` differing) — a legitimate
+   no-op advance; skipping it would re-request forever.
+5. It does **not** advance on any error class except StateInvalid, where it is invalidated and
    rebuilt (§7.6).
-5. It does **not** advance from an `Email/get` / `Mailbox/get` `state`, from a `queryState`, or
-   from a pushed `StateChange` value (§3.2).
-6. It is **not cleared** by logout-of-another-account, retention changes, eviction, cache
-   clearing from Settings (which clears *records*, and sets `resyncRequired` rather than nulling
-   cursors), or a failed body fetch.
-7. It is **destroyed only** with its account's namespace, on purge (§8.4).
+6. It never takes a value from a `queryState` or a pushed `StateChange` (§3.3).
+7. It is **not cleared** by logout-of-another-account, a retention change, eviction, or a Settings
+   "clear cache" (which clears *records* and sets `resyncRequired`, rather than nulling cursors).
+8. It is **destroyed only** with its account's namespace, on purge (§8.4).
 
-### 7.6 StateInvalid: the mandated full resync, done without blanking the UI
+### 7.6 StateInvalid: the mandated rebuild, without blanking the UI
 
-RFC 8620 §5.2 on `cannotCalculateChanges`: *"the server cannot calculate the changes from the
-state string given by the client… The client MUST invalidate its Foo cache."* This happens when
-our state is older than the server's change log, or after server data loss / a store rebuild.
-The design must handle it — this is the mandated path, not an edge case.
+RFC 8620 §5.2 on `cannotCalculateChanges`: *"the server cannot calculate the changes from the state
+string given by the client… The client MUST invalidate its Foo cache."* This is the mandated path,
+not an edge case: our state is older than the server's change log, or the server lost/rebuilt data.
 
-A literal reading ("delete everything, now") would empty a user's offline mail at the exact
-moment they may be offline and depending on it. So:
+A literal reading ("delete everything, now") would empty a user's offline mail exactly when they may
+be offline and depending on it. So:
 
 ```
-onStateInvalid(jmapAccountId, type):
-  cursor.invalidatedAt/Reason = ...            # cursor is no longer trusted or usable
-  accountState.resyncRequired = true
-  # records stay readable, marked stale in the UI. Nothing is trusted as CURRENT.
+onStateInvalid(jmapAccountId, type, reason):
+  patch cursor { invalidatedAt, invalidatedReason: reason }      # this cursor is unusable
+  patch account { resyncRequired: true }                         # sticky, survives restart
+  # records stay readable, marked stale. Nothing is trusted as CURRENT.
 
-reconcile(jmapAccountId):                       # unconditional once resyncRequired
-  1. capture fresh cursors (Mailbox/get ids:[], Email/get ids:[])   # BEFORE enumerating (§4.1)
-  2. full Mailbox/get -> upsert; delete mailbox rows not returned
-  3. ascending keyset enumeration of the whole envelope window, recording seen ids
-     (same paging as §6.1, resumable via scanCursor)
-  4. sweep:  delete every local email record with receivedAt >= windowStart
-             that was NOT seen in step 3
-             delete every local email record with receivedAt <  windowStart   # unverifiable
-  5. resyncRequired = false; cursors go live; coverage.phase = 'complete'
+reconcile(jmapAccountId):                                        # unconditional once required
+  0. PIN THE FLOOR (S2): sweepFloor = current retention floor, written with phase='reconciling'.
+     Every later step reads sweepFloor, never a live targetFrom.
+  1. Capture fresh cursors (Mailbox/get ids:[], Email/get ids:[]) and seedCursor(...) them
+     inside an EnumerationCommitment carrying sweepFloor  — BEFORE enumerating (§4.1).
+     The seeded cursors are LIVE IMMEDIATELY: from this point the delta path runs normally,
+     each cycle, alongside the enumeration (S9). Only the sweep waits.
+  2. Full Mailbox/get -> upsert; delete mailbox rows not returned.
+  3. Ascending keyset enumeration from sweepFloor over the whole envelope window,
+     resumable via scanCursor, recording seen ids. Spans as many cycles as needed.
+  4. SWEEP, gated on step 3 completing, and only against sweepFloor:
+        delete every local email record with receivedAt >= sweepFloor not seen in step 3
+        delete every local email record with receivedAt <  sweepFloor      # unverifiable
+  5. coveredFrom = sweepFloor; clear sweepFloor; resyncRequired = false;
+     clear cursor.invalidated*; phase = 'complete'.
+     If deferredTargetFrom is set (a retention widen arrived mid-reconcile),
+     apply it now and set phase='scanning' to extend coverage downward (S2).
 ```
 
-The cache *is* invalidated in the sense the RFC requires — no local record is treated as current,
-and every one is either re-verified or deleted before the account is considered in sync again.
-What is deferred is only the *moment of deletion*, from the start of the rebuild to its end.
-Consequences of that choice, stated so the reviewer can weigh them:
+**S2 — why step 0 exists.** Without a pinned floor, a user who widens retention *while* a reconcile
+is running (very plausible: the "re-syncing offline mail" banner is exactly what prompts someone to
+open Settings) makes step 4 sweep against the *new, wider* floor while step 3 only enumerated the
+*old, narrower* one — deleting every record in the gap. Permanently: `coveredFrom` is then set to
+the wider floor, so coverage believes that range is complete and delta sync cannot re-deliver
+pre-existing mail. Pinning the floor and deferring the widen to step 5 closes it.
 
-- **Deliberate:** a user who is offline when invalidation is detected keeps readable (stale) mail
-  instead of an empty inbox. The engine cannot even *begin* the rebuild while offline, so
-  literal-deletion would mean an indefinite blank.
-- **Accepted cost:** between detection and completion, a message deleted server-side may still be
-  visible locally. Bounded by the reconcile completing, surfaced by the stale marker, and no
-  worse than the staleness the offline case already implies.
-- **Not acceptable and therefore forbidden:** serving `Email/changes` from the invalidated
-  cursor, or letting the reconcile be skipped because a cycle succeeded in the meantime.
-  `resyncRequired` is sticky until step 5 and survives restarts.
+**S9 — why the delta path goes live at step 1.** Revision 1 forbade serving `/changes` until the
+rebuild finished. With envelope retention now wide (§2.1), a reconcile enumeration spans many
+cycles, so that prohibition would stall *all* incoming mail for the duration. The narrowed rule: the
+freshly seeded cursor is live immediately (it is the server's current state, so changes after it are
+delivered correctly, per §3.2); what the enumeration provides is history completeness, and only the
+sweep depends on that.
 
-Step 4's second clause matters: records older than the window can't be verified by an enumeration
-that only covers the window, so they are deleted rather than kept on faith. Normally retention
-has already evicted them.
+Consequences, stated so they can be weighed:
 
-An invalidation of either cursor type triggers reconcile for that JMAP account as a whole.
-Splitting it (rebuild Email but keep the Mailbox cursor) is not worth the reasoning burden —
-`Mailbox/get` is one cheap call.
+- **Deliberate:** a user offline when invalidation is detected keeps readable (stale) mail instead of
+  an empty inbox. The engine cannot even begin the rebuild while offline, so literal deletion would
+  mean an indefinite blank.
+- **Accepted cost:** between detection and the sweep, a server-side-deleted message may still be
+  visible locally. Bounded by the reconcile completing, surfaced by the stale marker, no worse than
+  the staleness offline already implies.
+- **Forbidden:** serving `/changes` from the *invalidated* cursor (as opposed to the freshly seeded
+  one), and letting the reconcile be skipped because some later cycle succeeded. `resyncRequired` is
+  sticky until step 5.
 
-### 7.7 Anti-wedge escalation (I10)
+Step 4's second clause matters: records older than the pinned floor cannot be verified by an
+enumeration that only covers the window, so they are deleted rather than kept on faith. Normally
+retention has already evicted them.
 
-Cursor-never-advances-on-failure has one theoretical failure mode: a page that can never be
-applied (a server that always 500s on one specific `sinceState`, a persistently oversized page,
-a genuine server bug) would retry forever, and the account would silently stop syncing.
+An invalidation of either cursor type reconciles that JMAP account as a whole — splitting it isn't
+worth the reasoning burden when `Mailbox/get` is one cheap call.
+
+### 7.6.1 `oldState` mismatch: confirm before escalating, and cap reconciles (S10)
+
+RFC 8620 §5.2 has the server echo `sinceState` as `oldState`. A mismatch means the server is not
+answering the question we asked, so revision 1 escalated straight to reconcile. But if a server ever
+echoes a semantically-equal, non-byte-identical `oldState`, *every* cycle would trip it, reconcile,
+seed a fresh cursor, and trip again — unbounded full-window rescans, and `consecutiveFailures` never
+catches it because each reconcile "succeeds."
 
 ```
-after a failed cycle with the same lastFailedState:
-  consecutiveFailures++
-  next attempt scheduled with the §7.2 backoff (cycle-level, cap 15 min)
-  consecutiveFailures == 2  -> retry the page with maxChanges halved
-  consecutiveFailures == 3  -> retry the page with maxChanges omitted entirely
-                               (some servers reject bounded change calculation)
-  consecutiveFailures >= 5  -> escalate: treat as StateInvalid (§7.6) and reconcile.
-                               Log loudly; surface "re-syncing offline mail" in the UI.
+on oldState mismatch:
+  re-issue the SAME Foo/changes call once and compare again.
+    still mismatched -> StateInvalid (§7.6), reason 'oldStateMismatch'
+    matched          -> treat as a transient anomaly: WARN, continue the drain
+
+reconcile ceiling:
+  reconcilesInWindow, reconcileWindowStartedAt (rolling 24 h) on AccountSyncState.
+  > 4 reconciles in 24 h -> ERROR log with the reason distribution,
+                            throttle to at most one reconcile per 24 h,
+                            surface a persistent "offline mail can't stay in sync" state.
 ```
 
-Escalating to reconcile is always achievable, because reconcile only needs the same calls a cold
-start needs. A stuck cursor is therefore self-healing within ~5 cycles, at the cost of one full
-window rescan. `consecutiveFailures` resets to 0 on any cycle with outcome `ok` or `partial`.
+Throttling rather than *stopping* is deliberate: a hard stop would trade S10's loop for an I10
+wedge. One reconcile per day still converges; the loud log and the UI state are what get a human
+involved.
 
-The `maxChanges` ladder is there because `cannotCalculateChanges` from a *bounded* call is a
-known ambiguity in the spec (a server may be unable to compute a limited change set while being
-perfectly able to compute the full one), and burning a whole resync on that would be a poor
-trade. Retry unbounded once before escalating.
+### 7.7 Anti-wedge escalation (I10) — per cursor, monotonically shrinking
+
+Two corrections from the review.
+
+**S6 — the counters move onto `SyncCursor`.** Revision 1 kept `consecutiveFailures` /
+`lastFailedState` as scalars on `AccountSyncState`, while cursors are per-type. If `Mailbox` drains
+cleanly every cycle and `Email` fails every cycle, a shared counter reset by "something succeeded"
+never escalates, and the Email cursor never advances again — silently, forever. That is exactly the
+wedge I10 exists to make unreachable. Counters are now per cursor, and:
+
+> **For escalation purposes a cycle is `failed` if *any* job failed, regardless of what the others
+> achieved.** `lastCycle.outcome` is the worst outcome across jobs, not the best. `madeProgress` is
+> tracked separately (it drives chaining, §10.3), and success on one cursor never resets another
+> cursor's counter.
+
+**S7 — the ladder shrinks monotonically.** Revision 1 went 500 → 250 → *unbounded*, justified by a
+claimed RFC ambiguity (that a server might fail a bounded change calculation while handling the full
+one). The reviewer could not substantiate that against RFC 8620 §5.2 and **neither can I** — the
+claim is withdrawn. Worse, removing the bound makes the retry strictly *larger* than the attempt
+that just failed, which actively worsens the likeliest real cause (response too large).
+
+```
+escalate(cursor) — counted only when lastFailedState == the state that failed again:
+  rung 0: maxChanges = min(maxObjectsInGet, 500)     (normal)
+  rung 1: 250
+  rung 2: 50
+  rung 3: 25
+  consecutiveFailures >= 5, or a failure at rung 3
+        -> StateInvalid (§7.6): reconcile, subject to §7.6.1's ceiling.
+           Log loudly; surface "re-syncing offline mail".
+```
+
+Reconcile is always achievable — it needs only the calls a cold start needs — so a stuck cursor
+self-heals within ~5 cycles at the cost of one window rescan. Any cycle in which *that cursor*
+advances resets its counters and rung to 0.
 
 ---
 
@@ -828,134 +1025,182 @@ per-account SQLCipher keys later"*).
 
 ### 8.1 Namespacing
 
-Every key derives from `LocalAccountId` (`username@host`, `account-utils.ts`):
+Every key derives from `LocalAccountId` (`username@host`, `account-utils.ts`). Under §14.3's
+sequencing the per-account store is one SQLite database file; the logical namespace is the same
+either way:
 
 ```
-vncmail:sync:v1:<accountId>:state          -> AccountSyncState (cursors, coverage, epoch, …)
-vncmail:sync:v1:<accountId>:env:<emailId>  -> envelope record
-vncmail:sync:v1:<accountId>:body:<emailId> -> body record
-vncmail:sync:v1:<accountId>:mbox:<mboxId>  -> mailbox row
-vncmail:sync:v1:<accountId>:idx            -> listing index (§9.3)
-vncmail:sync:v1:<accountId>:bodyq          -> body queue
-vncmail:sync:registry                      -> accountIds present + purge tombstones (§8.4)
+<per-account store>   -> mailbox, envelope, email_mailbox, body, body_queue, sync_state
+                         (cursors, coverage, flags) — ALL of it inside the account's own store
+vncmail:sync:registry -> ONLY: account ids present, purge tombstones, monotonic epochs
 ```
 
-**No sync state lives in a global key.** The registry holds only account ids and purge
-tombstones — never a cursor, never a record. This is the forward-compatibility requirement that
-makes step 6 work: when the backend becomes one SQLCipher database file per account, deleting the
-key and the file removes *all* of that account's sync state atomically. A cursor in a shared blob
-would survive the wipe and then be used against a freshly-empty store — advancing over changes
-that would never be re-delivered. That is exactly the silent-data-loss shape to design out now.
+**No cursor, coverage row, record, or resync flag lives in a global key.** This is the
+forward-compatibility requirement that makes step 6 work: when the store becomes a SQLCipher file,
+deleting the key and the file removes all of that account's sync state together. A cursor in a
+shared blob would survive the wipe and then be used against a freshly-empty store — advancing over
+changes that would never be re-delivered. Exactly the silent-data-loss shape to design out now.
 
-`vncmail:` rather than reusing the upstream `webmail:` prefix, so the v2 caches
-(`offline-cache-store.ts:16-17`) and the new store cannot alias, and so §14's migration can
-delete the old namespace wholesale.
+`epoch` is the one exception and is *not* sync state — it is a fencing token that must be
+**monotonic across a purge** (§8.3), so it has to live outside the namespace being purged.
+
+`vncmail:` rather than the upstream `webmail:` prefix, so the v2 caches
+(`offline-cache-store.ts:16-17`) cannot alias and §14.1 can delete the old namespace wholesale.
+
+**Accepted limitation (S16):** the registry stores plaintext `username@host` per account, outside
+any encrypted store. An unencrypted index is unavoidable — the engine must know which accounts exist
+and which purges are pending *before* any key is available. It adds no new exposure:
+`src/stores/account-store.ts` already persists `username` and `email` for every account to plain
+AsyncStorage under the `account-registry` key (`account-store.ts:150-151`). If that ever changes,
+the registry should move to `expo-secure-store` with it.
 
 ### 8.2 JMAP-level accounts within one login
 
-Cursors carry `jmapAccountId` (§3.1). v1 syncs the **primary mail account only**: shared/group
-accounts stay online-only, as they effectively are today (the email-store re-reads them in full,
-`email-store.ts:594-600`). Because the key already exists in the schema, adding them later means
-inserting rows, not migrating. What must *not* happen is a single "the account's Email state"
-scalar — that is the shape that has to be migrated later, and it would be wrong the moment a
-shared mailbox is synced.
+Cursors carry `jmapAccountId` (§3.1) and, per **S3**, so do the storage primary keys (§9.3). v1
+syncs the **primary mail account only**; shared/group accounts stay online-only, as they effectively
+are today (`email-store.ts:594-600`).
 
-### 8.3 Epoch guard for late writes
+Revision 1 claimed adding them later would be "inserting rows, not migrating." That was only true of
+the *cursor* schema — the SQL schema keyed rows by bare JMAP id, which S3 correctly identifies as
+wrong, since JMAP ids are unique only within an account (the codebase already works around this with
+`sharedMailboxId`, `email.ts:19-20`). With §9.3's account-scoped keys in place from day one, the
+claim now holds.
 
-Every cycle captures `(accountId, epoch)` at start and re-checks before each commit; a mismatch
-drops the commit and abandons the cycle. `epoch` increments on login, logout, account switch to
-this account, and purge.
+### 8.3 Epoch: owner, storage, and bump list (S1, S13)
 
-This closes D6 and generalises `jmapClientServesActiveAccount` (`email-store.ts:131-138`): the
-engine additionally verifies that the `jmapClient` currently serves the account the cycle is for,
-before *every* network call, not just at the start — the cycle is long-lived and `switchAccount`
-can land in the middle of it.
+Revision 1 named `epoch` as the guard against late writes but never said who owned it, where it
+lived, or how it was written — `SyncTxn` had no path for it at all.
 
-### 8.4 Logout, account removal, and the future key wipe
+- **Owner:** `SyncStoreFactory`. It is the only component that reads or increments epochs.
+- **Storage:** the registry (§8.1) — outside the per-account namespace, so it survives a purge. This
+  matters: if epoch reset to 0 when an account were purged and re-added, an in-flight cycle holding
+  epoch 0 could commit into the fresh namespace. Monotonic-across-purge closes that.
+- **Not writable from `SyncTxn`.** A transaction *reads* the epoch to validate itself and rejects
+  with `EpochMismatchError` on a change; it can never bump one.
+- **Bumped on:** login; logout; account switch *to* this account; purge; **`clearRecords()`**; **the
+  offline-cache feature being disabled** (S13). The last two are the additions — both are concurrent
+  mutations of a cycle's world, and without a bump the cycle's next commit would land on top of
+  them.
 
-Skill step 7 will require wipe-on-logout for the SQLCipher key. The cursor/state lifecycle must
-already respect that boundary:
+Every cycle captures `(accountId, epoch)` at start and re-validates before **every** commit, and
+additionally verifies that `jmapClient` currently serves that account before **every** network call
+— not just at cycle start, because the cycle is long-lived and `switchAccount` can land in the
+middle of it. That is the generalisation of `jmapClientServesActiveAccount`
+(`email-store.ts:131-138`) and what closes D6: a fetch issued for account A can never be written
+under account B, because the write's epoch check fails and, per I11, no other writer is racing it.
+
+### 8.4 Logout, account removal, feature-disable, and the future key wipe
+
+Skill step 7 will require wipe-on-logout for the SQLCipher key, so the lifecycle must respect that
+boundary already:
 
 ```
-purgeAccount(accountId):
+purgeAccount(accountId, reason: 'logout' | 'removed' | 'feature-disabled'):
   1. registry: add { accountId, purgePending: true }         # durable intent, crash-safe
-  2. epoch++ (in memory) -> every in-flight cycle's next commit is rejected
-  3. [step 6 and later] delete the SQLCipher key from expo-secure-store
+  2. epoch++ (registry)  -> every in-flight cycle's next commit is rejected
+  3. [once encrypted] delete the SQLCipher key from expo-secure-store
      -- FIRST, because it renders the data unreadable immediately even if the
         file delete fails or is interrupted
-  4. delete all keys / the database file under the account namespace
-  5. registry: remove the entry
+  4. delete the account's database file / all keys under its namespace
+  5. registry: remove the entry (keep the epoch)
 ```
 
-- **Crash between 1 and 5:** next launch sees `purgePending` and completes the purge before any
-  cycle starts. No half-purged account is ever synced against — a store missing arbitrary records
-  but holding a live cursor is the worst possible state, and step 1 makes it unreachable.
+- **Crash between 1 and 5:** next launch sees `purgePending` and completes the purge **before any
+  cycle starts**. A store missing arbitrary records while holding a live cursor is the worst possible
+  state, and step 1 makes it unreachable.
 - **Ordering 3 before 4** is the security property, not an optimisation: an interrupted purge must
   leave unreadable data, not readable data.
-- **`logout()` of one of several accounts** (`auth-store.ts:286-334`) purges only that namespace.
-  Other accounts' cursors are untouched — no shared state to disturb (§8.1).
-- **`logoutAll()`** purges each namespace in turn, then clears the registry.
+- **`logout()` of one of several accounts** (`auth-store.ts:286-334`) purges only that namespace;
+  other accounts' cursors are untouched (§8.1).
+- **`logoutAll()`** purges each namespace in turn.
+- **Feature-disabled purges too (S13, decided).** Toggling offline caching off purges that account's
+  store. Rationale: the user's intent in disabling is "don't keep my mail on this device", and once
+  the store is encrypted a dormant database plus a live key in `expo-secure-store` is a liability
+  with no benefit. Cost: re-enabling costs a full bootstrap, so the Settings toggle needs a
+  confirmation ("this deletes mail downloaded to this device").
 - **Re-login to a purged account** finds no state, so `coverage.phase === 'never-run'` and it
-  bootstraps (§4). A stale cursor surviving a purge would be catastrophic and is prevented by
-  §8.1 + step 4 covering the same namespace as step 1's tombstone.
-- **`AuthenticationError` during a cycle** is *not* a purge signal (§7.1: Auth → cursor
-  unchanged, cycle abandoned). Only the auth store's explicit logout path purges. A server
-  hiccup returning 401 must never delete a user's offline mail.
+  bootstraps (§4). A stale cursor surviving a purge would be catastrophic; §8.1 + step 4 covering the
+  same namespace as step 1's tombstone prevents it.
+- **`AuthenticationError` during a cycle is *not* a purge signal** (§7.1: Auth → cursor unchanged,
+  cycle abandoned). Only the auth store's explicit logout purges. A server hiccup returning 401 must
+  never delete a user's offline mail.
 
 ---
 
 ## 9. Storage-interface boundary
 
-The backend swap to `expo-sqlite` + `useSQLCipher` (step 6) must be a backend substitution, not a
-sync-engine rewrite. The engine therefore talks only to `SyncStore`.
+The engine talks only to `SyncStore`, so the SQLCipher flip (step 6) is a backend concern.
 
 ### 9.1 Interface sketch
 
 ```ts
-/** One atomic unit of work. On AsyncStorage this is emulated (§9.2); on SQLite it is a real tx. */
+/** One atomic unit of work. Under SQLite a real BEGIN…COMMIT. */
 export interface SyncTxn {
+  // ── records ──
   upsertMailboxes(rows: MailboxRow[]): Promise<void>;
-  patchMailboxCounts(patches: Array<{ id: string; counts: Partial<MailboxCounts> }>): Promise<void>;
-  deleteMailboxes(ids: string[]): Promise<void>;
+  patchMailboxCounts(p: Array<{ key: RowKey; counts: Partial<MailboxCounts> }>): Promise<void>;
+  deleteMailboxes(keys: RowKey[]): Promise<void>;
 
   upsertEnvelopes(rows: EnvelopeRow[]): Promise<void>;
   /** keywords + mailboxIds only — the Email `updated` path (§5.3). */
-  patchEnvelopeMutable(
-    patches: Array<{ id: string; keywords: Record<string, boolean>; mailboxIds: Record<string, boolean> }>,
-  ): Promise<void>;
-  putBody(id: string, body: BodyRow): Promise<void>;
-  /** Removes envelope + body + membership + body-queue rows for each id. */
-  deleteEmails(ids: string[]): Promise<void>;
+  patchEnvelopeMutable(p: Array<{
+    key: RowKey; keywords: Record<string, boolean>; mailboxIds: Record<string, boolean>;
+  }>): Promise<void>;
+  /** No-ops if the envelope is gone — prevents orphan bodies (F48, §5.1). */
+  putBodyIfEnvelopeExists(key: RowKey, body: BodyRow): Promise<boolean>;
+  /** Removes envelope + body + membership + body_queue rows for each key. */
+  deleteEmails(keys: RowKey[]): Promise<void>;
+  deleteBodies(keys: RowKey[]): Promise<void>;
 
+  // ── body queue (S12) ──
+  /** Insert-or-ignore. NEVER resets `attempts` on an existing row. */
   enqueueBodies(entries: BodyQueueEntry[]): Promise<void>;
+  /** Attempts/error/nextAttemptAt only. */
   updateBodyQueue(entries: BodyQueueEntry[]): Promise<void>;
-  dequeueBodies(ids: string[]): Promise<void>;
+  dequeueBodies(keys: RowKey[]): Promise<void>;
 
-  /** MUST be the last call in the txn (I1). */
-  putCursor(cursor: SyncCursor): Promise<void>;
-  putCoverage(coverage: CoverageState): Promise<void>;
-  putAccountFlags(flags: Partial<Pick<AccountSyncState,
-    'resyncRequired' | 'lastCycle' | 'consecutiveFailures' | 'lastFailedState'>>): Promise<void>;
+  // ── state: FIELD-LEVEL PATCHES ONLY (S1, I12). No whole-struct write exists. ──
+  /** The delta path's only cursor write. Cannot accept a SnapshotState (§3.2). */
+  advanceCursor(key: CursorKey, next: ChangesState): Promise<void>;
+  /** Bootstrap/reconcile only; writes the coverage commitment in the same txn (§3.2). */
+  seedCursor(key: CursorKey, commitment: EnumerationCommitment): Promise<void>;
+  patchCursor(key: CursorKey, patch: Partial<Omit<SyncCursor,
+    'type' | 'jmapAccountId' | 'state'>>): Promise<void>;
+  patchCoverage(jmapAccountId: JmapAccountId, patch: Partial<CoverageState>): Promise<void>;
+  patchAccountFlags(patch: Partial<Pick<AccountSyncState,
+    'resyncRequired' | 'lastCycle' | 'reconcilesInWindow' | 'reconcileWindowStartedAt'
+    | 'lastWindowFloor'>>): Promise<void>;
 }
+
+/** Row identity is (jmapAccountId, id) everywhere — S3. */
+export interface RowKey { jmapAccountId: JmapAccountId; id: string }
+export interface CursorKey { jmapAccountId: JmapAccountId; type: CursorType }
 
 export interface SyncStore {
   readonly accountId: LocalAccountId;
   readonly epoch: number;
 
+  /** Throws CorruptStateError; the caller applies I13 (resyncRequired) rather than
+   *  falling back to empty cursors. */
   loadAccountState(): Promise<AccountSyncState>;
 
   /**
-   * Runs `fn` as one unit. Rejects (and rolls back where the backend can) on any error.
-   * Rejects with EpochMismatchError if the account's epoch changed since open (§8.3).
+   * Runs `fn` as one unit, serialised by a PER-ACCOUNT MUTEX (S1) so a cycle commit and a
+   * concurrent clearRecords()/settings change cannot interleave. State patches are applied
+   * read-merge-write inside the same critical section. Rejects with EpochMismatchError if
+   * the registry's epoch for this account changed since open.
    */
   transaction<T>(fn: (txn: SyncTxn) => Promise<T>): Promise<T>;
 
-  // ── reads (offline UI + retention + FTS) ──
-  getEnvelope(id: string): Promise<EnvelopeRow | null>;
-  getBody(id: string): Promise<BodyRow | null>;
-  listMailboxes(): Promise<MailboxRow[]>;
-  /** Indexed; replaces the O(cache) scan of D3. */
+  // ── reads (offline UI, retention, FTS, body backfill) ──
+  getEnvelope(key: RowKey): Promise<EnvelopeRow | null>;
+  /** Bulk presence test — filters `updated` ids before fetching (§5.3). */
+  whichEnvelopesExist(keys: RowKey[]): Promise<RowKey[]>;
+  getBody(key: RowKey): Promise<BodyRow | null>;
+  listMailboxes(jmapAccountId: JmapAccountId): Promise<MailboxRow[]>;
+  /** Indexed. `hasBody: false` is job C2's driver (S9). */
   queryEnvelopes(q: {
+    jmapAccountId: JmapAccountId;
     mailboxId?: string;
     receivedBefore?: string;
     receivedAfter?: string;
@@ -963,101 +1208,153 @@ export interface SyncStore {
     limit: number;
     offset?: number;
   }): Promise<EnvelopeRow[]>;
-  countEnvelopes(q?: { mailboxId?: string }): Promise<number>;
+  countEnvelopes(q?: { jmapAccountId?: JmapAccountId; mailboxId?: string }): Promise<number>;
   bodyBytesTotal(): Promise<number>;
-  /** Oldest-body-first, for retention eviction. */
-  listBodiesForEviction(limit: number): Promise<Array<{ id: string; receivedAt: string; bytes: number }>>;
+  /** Oldest-body-first, from the body table alone (S12: it carries received_at). */
+  listBodiesForEviction(limit: number): Promise<Array<{ key: RowKey; receivedAt: string; bytes: number }>>;
+  /** Bodies with no surviving envelope — the orphan sweep (F45). */
+  listOrphanBodies(limit: number): Promise<RowKey[]>;
   takeBodyQueue(limit: number, now: number): Promise<BodyQueueEntry[]>;
 
-  /** Records only; cursors are invalidated via resyncRequired, never nulled (§7.5 rule 6). */
+  /**
+   * Records + body queue (S12), NOT cursors. Sets resyncRequired and bumps the epoch
+   * via the factory (§8.3), so an in-flight cycle cannot write over it (S1).
+   */
   clearRecords(): Promise<void>;
   /** Full namespace removal, per §8.4. */
   purge(): Promise<void>;
 }
 
 export interface SyncStoreFactory {
+  /** Lazy: never materialises a file or a key for an account whose feature is off (§9.5). */
   open(accountId: LocalAccountId): Promise<SyncStore>;
+  isMaterialised(accountId: LocalAccountId): Promise<boolean>;
   listAccounts(): Promise<LocalAccountId[]>;
-  completePendingPurges(): Promise<void>;   // called once at launch (§8.4)
+  epochFor(accountId: LocalAccountId): Promise<number>;
+  bumpEpoch(accountId: LocalAccountId, reason: string): Promise<number>;
+  completePendingPurges(): Promise<void>;   // once at launch, before any cycle (§8.4)
 }
 ```
 
-The engine imports `SyncStore` and nothing else about persistence. No AsyncStorage import, no
-`expo-sqlite` import, no SQL, no key strings outside `store.ts`.
+The engine imports `SyncStore` and nothing else about persistence: no SQL, no `expo-sqlite`, no
+AsyncStorage, no key strings outside `store*.ts`.
 
-### 9.2 The AsyncStorage backend's honest limitation
+### 9.2 Which backend ships, and when (S4)
 
-AsyncStorage has no multi-key transaction. `transaction()` on that backend therefore provides
-**ordering, not atomicity**:
+**Revised: plain `expo-sqlite` is the shipping backend, and it ships *before* the engine.**
 
-1. Perform every record write, awaiting each. Any rejection aborts before the cursor is touched.
-2. Write the cursor / coverage / flags **last**, as a single `AccountSyncState` blob.
+Revision 1 planned an AsyncStorage backend first, with §9.3's SQLite schema as "step 6 shape." The
+review is right that this is incoherent: §1.3 claimed D3 was closed by that schema while the
+shipping backend couldn't implement an indexed `queryEnvelopes` at all. AsyncStorage leaves only two
+options, both bad — repeat today's O(cache) scan (D3 ships unfixed), or rewrite a full
+membership-index blob on every page commit (an availability problem in its own right, and much worse
+now that the envelope window is wide, §2.1).
 
-A crash between 1 and 2 leaves records written and the cursor behind → replay → I5 makes it a
-no-op. A crash *inside* 1 leaves a partially-applied page and an unchanged cursor → replay
-completes it. Both are safe. The one thing that must never happen — cursor ahead of records — is
-prevented by ordering alone.
+Reordering also fixes **S1** properly rather than by discipline: `transaction()` becomes a real
+`BEGIN…COMMIT`, so cursor-last is enforced by the database instead of by write ordering plus a
+mutex.
 
-Two hard requirements on this backend, both closing D2: `multiSet` is used where available and
-its rejection propagates; and `putCursor` never runs unless every preceding write resolved. The
-existing fire-and-forget `void AsyncStorage.setItem(...).catch(warn)` pattern is banned in the
-sync path.
+What this does *not* pull forward: **SQLCipher.** `expo-sqlite` works in Expo Go; only
+`useSQLCipher` does not (manual §4). So plain SQLite keeps the current dev workflow intact and
+leaves the human-gated key-lifecycle decision (skill step 7) exactly where it is. Enabling
+encryption later changes the file format, which is free here because §14.1 already specifies
+discard-and-rebuild: the flip is purge + re-bootstrap.
 
-Under SQLite (step 6), `transaction()` becomes a genuine `BEGIN … COMMIT` and the ordering
-requirement becomes redundant but harmless. **No engine code changes** — which is the test of
-whether this boundary was drawn in the right place.
+Two backends therefore exist: `store-sqlite.ts` (the app) and `store-memory.ts` (unit tests, and the
+second implementation that proves the boundary).
 
-### 9.3 Schema sketch (informs both backends)
+**Contingency, if the reordering is rejected** (e.g. `expo-sqlite` integration stalls): an
+AsyncStorage backend is implementable, with these limits stated up front rather than discovered —
+`transaction()` provides **ordering, not atomicity** (every record write awaited first, the state
+patch last, so a crash can only leave records ahead of the cursor, which I5 makes harmless); the
+per-account mutex becomes load-bearing rather than belt-and-braces; and **D3 ships unfixed** —
+§1.3's "closed by" claim must stay withdrawn. `void AsyncStorage.setItem(...).catch(warn)` is banned
+in the sync path either way (D2/I4).
+
+Under SQLite the ordering requirement becomes redundant but harmless, and **no engine code changes**
+— which is the test of whether this boundary was drawn in the right place.
+
+### 9.3 Schema sketch
 
 ```sql
--- step 6 shape; the AsyncStorage backend emulates the same access patterns.
+-- S3: every key is account-scoped. JMAP ids are unique only WITHIN an account
+-- (the codebase already works around this at email.ts:19-20), so a bare-id PK would
+-- silently merge two accounts' rows the moment shared/group accounts land — cross-account
+-- leakage inside the design whose entire §8 is about isolation. Costs nothing today;
+-- needs a real migration later.
 CREATE TABLE mailbox (
-  id TEXT PRIMARY KEY, jmap_account_id TEXT NOT NULL, name TEXT NOT NULL,
-  parent_id TEXT, role TEXT, sort_order INTEGER,
+  jmap_account_id TEXT NOT NULL, id TEXT NOT NULL,
+  name TEXT NOT NULL, parent_id TEXT, role TEXT, sort_order INTEGER,
   total_emails INTEGER, unread_emails INTEGER, total_threads INTEGER, unread_threads INTEGER,
-  my_rights TEXT, is_subscribed INTEGER
+  my_rights TEXT, is_subscribed INTEGER,
+  PRIMARY KEY (jmap_account_id, id)
 );
 CREATE TABLE envelope (
-  id TEXT PRIMARY KEY, jmap_account_id TEXT NOT NULL, thread_id TEXT,
-  received_at TEXT NOT NULL, size INTEGER, subject TEXT, preview TEXT,
-  from_json TEXT, to_json TEXT, cc_json TEXT,
+  jmap_account_id TEXT NOT NULL, id TEXT NOT NULL,
+  thread_id TEXT, received_at TEXT NOT NULL, size INTEGER,
+  subject TEXT, preview TEXT, from_json TEXT, to_json TEXT, cc_json TEXT,
   has_attachment INTEGER, keywords_json TEXT NOT NULL,
   has_body INTEGER NOT NULL DEFAULT 0, body_bytes INTEGER NOT NULL DEFAULT 0,
-  cached_at INTEGER NOT NULL
+  cached_at INTEGER NOT NULL,
+  PRIMARY KEY (jmap_account_id, id)
 );
-CREATE INDEX envelope_received ON envelope(received_at DESC);
--- Membership is its own table: an email is in many mailboxes, and listing by folder
--- must be an index seek, not a scan of every cached body (D3).
+CREATE INDEX envelope_received ON envelope(jmap_account_id, received_at DESC);
+-- Job C2's driver (S9): envelopes inside the body window with no body yet.
+CREATE INDEX envelope_nobody ON envelope(jmap_account_id, has_body, received_at DESC);
+-- Membership is its own table: an email is in many mailboxes, and listing by folder must be
+-- an index seek, not a scan of every cached body (D3).
 CREATE TABLE email_mailbox (
-  email_id TEXT NOT NULL, mailbox_id TEXT NOT NULL,
-  PRIMARY KEY (email_id, mailbox_id)
+  jmap_account_id TEXT NOT NULL, email_id TEXT NOT NULL, mailbox_id TEXT NOT NULL,
+  PRIMARY KEY (jmap_account_id, email_id, mailbox_id)
 );
-CREATE INDEX email_mailbox_by_mailbox ON email_mailbox(mailbox_id);
-CREATE TABLE body (email_id TEXT PRIMARY KEY, json TEXT NOT NULL, bytes INTEGER NOT NULL);
+CREATE INDEX email_mailbox_by_mailbox ON email_mailbox(jmap_account_id, mailbox_id);
+-- S12: received_at lives here too, so eviction is a single-table ordered scan and cannot be
+-- blinded by a missing/failed join to envelope.
+CREATE TABLE body (
+  jmap_account_id TEXT NOT NULL, email_id TEXT NOT NULL,
+  received_at TEXT NOT NULL, json TEXT NOT NULL, bytes INTEGER NOT NULL,
+  PRIMARY KEY (jmap_account_id, email_id)
+);
+CREATE INDEX body_received ON body(jmap_account_id, received_at ASC);
 CREATE TABLE body_queue (
-  email_id TEXT PRIMARY KEY, jmap_account_id TEXT NOT NULL, received_at TEXT NOT NULL,
-  attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER, last_error TEXT
+  jmap_account_id TEXT NOT NULL, email_id TEXT NOT NULL, received_at TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER, last_error TEXT,
+  PRIMARY KEY (jmap_account_id, email_id)
 );
 CREATE TABLE sync_state (k TEXT PRIMARY KEY, v TEXT NOT NULL);  -- cursors, coverage, flags
 ```
 
-**Deliberately no foreign key** from `email_mailbox.mailbox_id` → `mailbox.id`, and none from
-`email_mailbox.email_id` → `envelope.id` with a cascade that could delete envelopes. Per §5.5
-the two change streams are not transactionally coupled, so membership rows referencing a
-not-yet-fetched or already-destroyed mailbox are a normal transient state. A FK here would turn
-correct behaviour into a constraint violation, and a cascade would delete mail on mailbox
-deletion, violating I7.
+**Deliberately no foreign keys** from `email_mailbox.mailbox_id` → `mailbox`, and no cascade from
+`envelope`. Per §5.5 the two change streams are not transactionally coupled, so membership rows
+referencing a not-yet-fetched or already-destroyed mailbox are a normal transient state; an FK would
+turn correct behaviour into a constraint violation, and a cascade on mailbox deletion would delete
+mail, violating I7. Body/envelope consistency is maintained by `putBodyIfEnvelopeExists` +
+`deleteEmails` + the orphan sweep, not by the schema.
 
-`sync_state` living in the same database file as the records is what makes §8.4's atomic wipe
-work.
+`sync_state` sitting in the same file as the records is what makes §8.4's atomic wipe work.
 
 ### 9.4 Reserved hooks
 
-- **FTS5 (step 9):** `upsertEnvelopes` / `putBody` are the only write paths for indexable
-  content, so index population is a trigger or an in-transaction insert there. No engine change.
+- **FTS5 (step 9):** `upsertEnvelopes` / `putBodyIfEnvelopeExists` are the only write paths for
+  indexable content, so index population is a trigger or an in-transaction insert there. No engine
+  change. Note §5.6's consequence: an FTS/SQL predicate sees server truth, not unflushed local
+  intent.
 - **Attachment blobs:** today `expo-file-system` under `Paths.document/offline-attachments/`
-  (`offline-cache-store.ts:2-4`). Out of scope; when added, blob deletion belongs in
-  `deleteEmails` and `purge` so it cannot leak past an account wipe.
+  (`offline-cache-store.ts:2-4`). Out of scope; when added, blob deletion belongs in `deleteEmails`
+  and `purge` so it cannot leak past an account wipe.
+
+### 9.5 Lazy materialisation (S13)
+
+`SyncStoreFactory.open()` **must not create** a database file (or, later, a SQLCipher key) for an
+account whose offline caching is disabled. Revision 1 left the read paths
+(`email-store.ts:646-663`, `:941-961`) calling into the store unconditionally, which — once step 6
+lands — would materialise a per-account encrypted database and key for users who never enabled the
+feature. Rules:
+
+- Read paths check `offlineCacheEnabled` for that account **before** calling `open()`.
+- `open()` on a non-materialised account returns a store in a read-only empty state and creates
+  nothing; only a *write* materialises, and only the engine writes.
+- `isMaterialised()` exists so Settings can show accurate storage stats without creating anything.
 
 ---
 
@@ -1067,27 +1364,32 @@ work.
 
 | # | Trigger | Job(s) | Throttle |
 |---|---|---|---|
-| T1 | Live session established (cold start, `auth-store` → `session != null`) | A, then B if `coverage.phase !== 'complete'`, then C | 2 s delay (keeps today's behaviour, `App.tsx:280-282`) |
+| T1 | Live session established (cold start) | A, B, C | 2 s delay (keeps today's behaviour, `App.tsx:280-282`) |
 | T2 | App foreground (`AppState` → `active`) | A, C | min 30 s since last cycle |
 | T3 | Pull-to-refresh | A, C | none (user-initiated); coalesces into a running cycle |
 | T4 | Network regained (`network-store` false→true) | A, C | 3 s debounce + per-account jitter |
-| T5 | Push `StateChange` (SSE now, WebSocket later) | A, C | 2 s debounce, plus the state-equality check of §10.4 |
-| T6 | Retention setting changed | B (widen) or eviction only (narrow) | none |
-| T7 | `drainPending` true at launch | A | immediate, no 2 s delay |
+| T5 | Push `StateChange` (SSE now, WebSocket later) | A, C | 2 s debounce + the state-equality check of §10.4 |
+| T6 | Retention setting changed | B (envelope widen), C2 (body widen), eviction only (narrow) | none |
+| **T9** | **Unfinished work (S8):** previous cycle `partial`, **or** any cursor `drainPending`, **or** `coverage.phase` ∈ {`scanning`,`reconciling`}, **or** the body queue is non-empty | the unfinished job(s) | 5 s after the previous cycle, subject to §10.3's chaining rule |
+| **T10** | **Offline caching disabled (S13)** | abort + purge (§8.4) | none |
 | T8 | Background refresh (later, out of scope) | A, C with background budgets | OS-governed |
 
-Explicitly **not** a trigger: a periodic foreground timer. Push (T5) plus foreground (T2) plus
-network-recovery (T4) covers the ground; a polling interval would burn battery for cases already
-covered. `push.ts:163-202`'s `startPolling` remains only as the transport fallback when neither
-WebSocket nor SSE is available, and when it is active its state-change events arrive as T5.
+Revision 1 had no T9, so — as S8 shows — a large backlog could stall indefinitely: nothing
+re-triggered a cycle purely because the previous one was `partial`, other than relaunch. A user who
+enables the feature with a big mailbox and then stays foregrounded reading mail might never get a
+second cycle. T9 closes that; T7 in revision 1 (`drainPending` at launch) is subsumed by it.
+
+Explicitly **not** a trigger: a periodic foreground timer. T2/T4/T5/T9 cover the ground.
+`push.ts:163-202`'s `startPolling` remains only as a *transport* fallback when neither WebSocket nor
+SSE is available; its state-change events arrive as T5.
 
 ### 10.2 Not triggered by
 
-Opening a mailbox, opening a message, or scrolling. Those are `email-store` concerns and already
-have their own network paths. The engine must never be on the critical path of a UI interaction —
-if it is, its budgets and backoff become user-visible latency.
+Opening a mailbox, opening a message, or scrolling — those are `email-store` concerns with their own
+network paths. The engine must never be on the critical path of a UI interaction; if it is, its
+budgets and backoff become user-visible latency.
 
-### 10.3 Single-flight and coalescing (closes D7)
+### 10.3 Single-flight, coalescing, and chaining (closes D7, S8)
 
 Per `LocalAccountId`:
 
@@ -1096,307 +1398,381 @@ runCycle(accountId, reason):
   if inFlight(accountId):
      wakePending[accountId] |= reason        # remember WHY, don't abort
      return inFlight[accountId]              # callers await the same promise
-  ...run...
+  ...run jobs sequentially per I11...
   finally:
-     if wakePending[accountId]: schedule another cycle immediately
+     if wakePending: schedule immediately
+     else if unfinishedWork() && lastCycle.madeProgress: schedule via T9 (5 s)
+     else if unfinishedWork(): STOP chaining — wait for a real trigger
 ```
 
-The running cycle is never aborted to serve a new trigger — that is D7's bug, where "Sync now"
-during a sync produced a cancelled sync and nothing else. It is aborted only by: account switch,
-logout/purge, network loss, app background (at the next page boundary), or a budget deadline —
-all of which leave a committed cursor and a resumable drain.
+The chaining rule is the guard S8's fix needs to avoid replacing a stall with a hot loop: **chained
+cycles continue only while progress is being made.** A cycle that finishes with work outstanding and
+`madeProgress: false` is not making headway (server refusing, budget-thrash), so chaining stops and
+a genuine trigger — or §7.7's escalation — takes over.
 
-Cross-account: cycles for *different* accounts may run concurrently, but are serialised in
-practice because `jmapClient` is a singleton bound to one account (§8.3 re-checks before every
-call). v1 therefore syncs **only the active account**; a background multi-account sweep needs a
-non-singleton client and is out of scope.
+A running cycle is never aborted to serve a new trigger (that was D7: "Sync now" during a sync
+produced a cancelled sync and nothing else). It aborts only on: account switch, logout/purge,
+**offline caching disabled (T10, S13)**, network loss, app background (at the next page boundary), or
+a budget deadline — all of which leave a committed cursor and resumable state.
+
+Cross-account: `jmapClient` is a singleton bound to one account, so v1 syncs **only the active
+account**; a multi-account sweep needs a non-singleton client and is out of scope.
 
 ### 10.4 Push, and the WebSocket question
 
 `StateChange` (RFC 8620 §7.1) is `{ changed: { <jmapAccountId>: { <type>: <newState> } } }` —
-already typed (`types.ts:587-590`) and already routed to the stores
-(`email-store.ts:969-1003`).
-
-Engine handling:
+already typed (`types.ts:587-590`) and routed (`email-store.ts:969-1003`).
 
 ```
 onStateChange(change):
   for (jmapAccountId, types) of change.changed:
     if not one of ours: ignore
-    if types.Email    and types.Email    !== cursor(Email, jmapAccountId)?.state:    wake = true
-    if types.Mailbox  and types.Mailbox  !== cursor(Mailbox, jmapAccountId)?.state:  wake = true
+    if types.Email   && types.Email   !== cursor(Email,   jmapAccountId)?.state: wake = true
+    if types.Mailbox && types.Mailbox !== cursor(Mailbox, jmapAccountId)?.state: wake = true
     if types.EmailDelivery: wake = true          # no /changes for it; signal only
   if wake: debounce(2s) -> runCycle(reason: 'push')
 ```
 
-Two rules, both load-bearing:
+Two load-bearing rules:
 
-- **The pushed `newState` is never written as a cursor.** It is the server's *current* state; our
-  cursor is our *last applied* state. Assigning it would skip every change in between —
-  permanently, silently, and precisely for the mail the push was announcing. This is the single
-  most tempting wrong optimisation in the whole design.
-- **State equality is a cheap, safe dedupe.** If the pushed state equals our cursor, we are
-  already current and can skip the round-trip entirely. Common when our own mutation caused the
-  change.
+- **The pushed `newState` is never written as a cursor.** It is the server's *current* state; ours is
+  our *last applied* state. Assigning it would skip every change in between — permanently, silently,
+  and precisely for the mail the push was announcing. The most tempting wrong optimisation in the
+  design.
+- **State equality is a cheap, safe dedupe.** Pushed state equal to our cursor means we are already
+  current; skip the round-trip. Common when our own mutation caused the change.
 
-**JMAP WebSocket (the sibling Electron decision).** The Electron client confirmed
-`stalwart.sandbox.vnc.de` advertises `urn:ietf:params:jmap:websocket` with `supportsPush: true`
-at `wss://stalwart.sandbox.vnc.de/jmap/ws` (manual §4/§5, independently confirmed twice).
-**Decision for mobile: yes, eventually — foreground only, as a transport swap behind the same
-handler.** Wiring is out of scope here; the design constraint it imposes now is that the engine's
-push entry point is `onStateChange(change: StateChange)` and nothing else, so the transport
-ladder becomes:
+**JMAP WebSocket.** The Electron client confirmed `stalwart.sandbox.vnc.de` advertises
+`urn:ietf:params:jmap:websocket` with `supportsPush: true` at `wss://…/jmap/ws` (manual §4/§5,
+independently confirmed twice). **Decision for mobile: yes, eventually — foreground only, as a
+transport swap behind the same handler.** The constraint that imposes now is that the engine's push
+entry point is `onStateChange(change: StateChange)` and nothing else:
 
 ```
-foreground: WebSocket (if session advertises it) -> SSE (push.ts:120) -> polling (push.ts:163)
+foreground: WebSocket (if advertised) -> SSE (push.ts:120) -> polling (push.ts:163)
 background: FCM/APNs via vncmail-relay -> wakes the app -> T5/T8
 ```
 
-A mobile app must not hold a WebSocket open in the background (doze, battery, OS socket
-reclamation); the relay path already exists for that and is the right one. Because all three
-foreground transports emit the same `StateChange`, swapping them changes zero lines in the
-engine — which is the point of putting the boundary at `onStateChange` rather than inside it.
+A mobile app must not hold a WebSocket open in the background (doze, battery, socket reclamation);
+the relay path exists for that. Because all three foreground transports emit the same `StateChange`,
+swapping them changes zero engine lines.
 
-### 10.5 Headless-callability constraint (for step T8 later)
+### 10.5 Headless-callability constraint
 
-Even though background scheduling is out of scope, the engine must already satisfy: no dependency
-on React, on a mounted component, or on a Zustand store for *correctness* (progress reporting is
-an optional observer); a cycle callable as `runCycle(accountId, {budget: 'background'})`; and a
-cooperative deadline checked between pages so it can commit and return before the OS budget
-expires. Honouring this now is nearly free; retrofitting it means unpicking store coupling later.
+Even with background scheduling out of scope, the engine must already satisfy: no dependency on
+React, a mounted component, or a Zustand store for *correctness* (progress reporting is an optional
+observer); a cycle callable as `runCycle(accountId, {budget: 'background'})`; and a cooperative
+deadline checked between pages so it can commit and return before the OS budget expires. Nearly free
+now; retrofitting it means unpicking store coupling later.
 
 ---
 
 ## 11. Failure-mode enumeration
 
-Every row is a concrete scenario with the concrete rule, and is intended to become a test case
-(§13). "Cursor" = the `Email`/`Mailbox` cursor for the account in question.
+Each row is a concrete scenario with a concrete rule, intended to become a test case (§13).
+Rows added or rewritten in revision 2 are **bold**.
 
 | # | Scenario | Rule |
 |---|---|---|
-| F1 | App killed by OS mid-page-drain | Cursor is the last fully-applied page (I1). Next launch sees `drainPending`, re-requests the same `sinceState`, re-applies idempotently (I5). Cost: ≤1 page. |
-| F2 | App killed mid-body-download | Body queue entry stays queued (job C is separate state). Envelope already durable. Next cycle re-fetches that body. Cursor untouched. |
-| F3 | App killed mid-bootstrap coverage scan | `scanCursor` is the last committed page's `max(receivedAt)`; scan resumes there. Cursors were captured in step 1 (§4.1), so nothing is lost regardless of when the kill happened. |
-| F4 | App killed mid-purge | `purgePending` tombstone in the registry; purge completes at next launch *before* any cycle runs (§8.4). |
-| F5 | Two rapid foreground events → overlapping runs | Single-flight per account; second call sets `wakePending` and awaits the in-flight promise. No abort (closes D7). |
+| F1 | App killed by OS mid-page-drain | Cursor is the last fully-applied page (I1). Next launch sees `drainPending`, T9 fires, the same `sinceState` is re-applied idempotently (I5). Cost ≤1 page. |
+| F2 | App killed mid-body-download | Body queue entry stays queued (separate state). Envelope already durable. Next cycle re-fetches. Cursor untouched. |
+| F3 | App killed mid-bootstrap scan | `scanCursor` is the last committed page's `max(receivedAt)`; the scan resumes there. Cursors were seeded in step 1 (§4.1), so nothing is lost regardless of when the kill happened. |
+| F4 | App killed mid-purge | `purgePending` tombstone; purge completes at next launch **before** any cycle runs (§8.4). |
+| F5 | Two rapid foreground events → overlapping runs | Single-flight; the second call sets `wakePending` and awaits the in-flight promise. No abort (closes D7). |
 | F6 | Pull-to-refresh during a running cycle | Same as F5. User-initiated triggers never cancel work. |
-| F7 | Mailbox deleted server-side mid-sync | `Mailbox/changes destroyed` → delete the mailbox row only. Email records untouched (I7); their truth arrives on `Email/changes` as `destroyed` or `updated` `mailboxIds`. No cascade. |
+| F7 | Mailbox deleted server-side mid-sync | `Mailbox/changes destroyed` → delete the mailbox row only. Email records untouched (I7); truth arrives on `Email/changes`. No cascade. |
 | F8 | Envelope references a mailbox we haven't fetched | Keep the membership row; no FK (§9.3). Folder appears when `Mailbox/changes` catches up. |
-| F9 | `cannotCalculateChanges` | StateInvalid → invalidate cursor, `resyncRequired = true`, reconcile per §7.6. Records stay readable, marked stale, until the rebuild's sweep. |
-| F10 | Server rebuild / `newState` unrecognised or regressed | Detected either as F9 or by `res.oldState !== cursor.state`. Same reconcile path. A cursor is never silently replaced by an unrelated token (I2/I3). |
-| F11 | `Email/get` returns `notFound` for an id from `created`/`updated` | Destroyed between the two calls. Skip the id; page still counts as applied; no retry, no error. |
-| F12 | `Email/get` batch fails mid-page (5xx) | Records already written stay (§7.4); cursor unchanged; page replays next cycle. |
-| F13 | Network drops mid-cycle | Transport class → cursor unchanged, cycle `abandoned`/`failed`; T4 re-triggers on recovery. No error banner if the device reports offline (§7.3). |
-| F14 | `hasMoreChanges` never becomes false (firehose or server bug) | Page budget (§6.4) ends the cycle `partial` with the cursor at the last committed page. Progress every cycle; no infinite loop (I9), no wedge. |
-| F15 | HTTP 429 / `urn:…:error:limit` `rateLimit` | RateLimit class: honour `Retry-After` (already parsed, `jmap-client.ts:436-440`), full-jitter backoff, cursor unchanged. |
-| F16 | Method error type we don't recognise | Default to ServerTransient — retry and back off. Never Fatal, never StateInvalid (§7.1). |
-| F17 | `invalidArguments` (our bug) | Fatal: no retry, cursor unchanged, cycle `failed`, logged loudly. Escalates via §7.7 after 5 cycles, so even our own bug can't permanently wedge the account (I10). |
-| F18 | Same `sinceState` fails 5 cycles running | §7.7 ladder: halve `maxChanges` → omit `maxChanges` → escalate to reconcile. Self-heals. |
-| F19 | `sessionState` changed (accounts/capabilities differ) | Re-read the session; if the primary `jmapAccountId` changed, treat the old account's cursors as belonging to a different account and reconcile. `maxObjectsInGet` / `maxCallsInRequest` are re-read for batch sizing. |
-| F20 | 401 mid-cycle after the client's own refresh retry | Auth class: cursor unchanged, cycle abandoned. **Never** purges or clears records — only the auth store's explicit logout does (§8.4). |
-| F21 | Account switched mid-cycle | Epoch guard: next commit is rejected, cycle abandoned; nothing lands in the wrong namespace (I6, closes D6). |
-| F22 | Logout mid-cycle | Epoch bump + purge tombstone; in-flight commits rejected; purge completes even if the cycle was mid-page. |
-| F23 | Retention window widened (7 → 30 days) | Not a resync. `targetFrom` moves back; job B scans ascending from the new `targetFrom` to `coveredFrom`. Cursors untouched (§7.5 rule 6). |
-| F24 | Retention window narrowed (30 → 7 days) | Evict records below the new floor; `coveredFrom = targetFrom`. Cursors untouched. |
-| F25 | MB cap exceeded | Evict **bodies** oldest-first (envelopes survive, so the message stays listed and openable online). Cursors untouched. Body queue entries for evicted-window messages are dropped. |
-| F26 | `updated` arrives for an id we don't hold (evicted or out of window) | Include it in the 3-property `updated` batch; retention decides whether to keep the resulting record. Never resurrect a body. Never fail the page. |
-| F27 | `destroyed` arrives for an id we never held | No-op. Page still applied, cursor still advances. |
-| F28 | Delta reverts an unflushed offline mutation | Re-apply pending outbox ops (full-state, idempotent) on top of the server state after each delta (§5.6). Server is the base; local intent is the overlay. |
-| F29 | Pending outbox `destroy` for a message the delta reports `created`/`updated` | Apply server state, do not enqueue a body, let the flush + subsequent `destroyed` remove it. |
-| F30 | Storage write fails (disk full, quota) | Cycle fails immediately, cursor unchanged, error surfaced (I4). Never warn-and-continue (closes D2). |
-| F31 | Device clock wrong / skewed / DST | No correctness impact (I8). Cursors are opaque server strings; `scanCursor` is a server `receivedAt`. Only the window boundary and backoff delays use the device clock. |
-| F32 | Corrupt local record (unparseable JSON) | Delete the record, enqueue a re-fetch, log. Do **not** invalidate the cursor — one bad row is not a state problem. |
-| F33 | Coverage scan makes no forward progress (`receivedAt` tie cluster) | No-forward-progress guard: `anchor`/`anchorOffset`, then +1 ms, with a warning (§6.1). Cannot loop forever. |
-| F34 | Two devices on the same account | Nothing special. Cursors are per-device; each converges independently. The other device's mutations arrive as ordinary `updated`. |
-| F35 | User clears the cache from Settings while a cycle runs | `clearRecords()` wipes records and sets `resyncRequired`; the in-flight cycle's commit is rejected by the epoch guard; reconcile rebuilds. Cursors are not nulled (§7.5 rule 6) — a null cursor plus an empty store is indistinguishable from "never synced", which is fine, but `resyncRequired` makes the intent explicit and survives a crash. |
-| F36 | Server returns `hasMoreChanges: true` with all-empty arrays | Treat as a valid page: advance the cursor to `newState`, continue draining. Counts against the page budget, so a server that does this forever still terminates. |
+| F9 | `cannotCalculateChanges` | StateInvalid → invalidate cursor, `resyncRequired`, reconcile per §7.6 with a **pinned** `sweepFloor`. Records stay readable, marked stale, until the sweep. |
+| F10 | Server rebuild / `newState` unrecognised | Detected as F9 or via `oldState` mismatch (F39). Same reconcile path. A cursor is never silently replaced (I2/I3). |
+| F11 | `Email/get` returns `notFound` for a `created`/`updated` id | Destroyed between the calls. Skip the id; the page still counts as applied; no retry, no error. |
+| F12 | `Email/get` batch fails mid-page (5xx) | Records already written stay (§7.4); cursor unchanged; the page replays. |
+| F13 | Network drops mid-cycle | Transport → cursor unchanged, cycle `abandoned`/`failed`; T4 re-triggers on recovery. No error banner while the device reports offline (§7.3). |
+| F14 | `hasMoreChanges` never becomes false | Page budget (§6.4) ends the cycle `partial` with the cursor at the last committed page; T9 resumes. Progress every cycle; no loop (I9), no wedge. |
+| F15 | HTTP 429 / `error:limit` `rateLimit` | RateLimit: honour `Retry-After` (`jmap-client.ts:436-440`), full-jitter backoff, cursor unchanged. |
+| F16 | Unrecognised method error type | Default ServerTransient — retry and back off. Never Fatal, never StateInvalid (§7.1). |
+| F17 | `invalidArguments` (our bug) | Fatal: no retry, cursor unchanged, `failed`, logged loudly. Escalates via §7.7 after 5 cycles, so even our own bug can't wedge the account (I10). |
+| **F18** | Same `sinceState` fails repeatedly | §7.7 ladder, **monotonically smaller** (500→250→50→25), then reconcile subject to §7.6.1's ceiling. Self-heals. |
+| F19 | `sessionState` changed | Re-read the session; if the primary `jmapAccountId` changed, treat old cursors as another account's and reconcile. Re-read `maxObjectsInGet` / `maxCallsInRequest` for batch sizing. |
+| F20 | 401 mid-cycle after the client's own refresh | Auth: cursor unchanged, cycle abandoned. **Never** purges or clears records (§8.4). |
+| F21 | Account switched mid-cycle | Epoch guard rejects the next commit; cycle abandoned; plus a per-network-call check that `jmapClient` still serves this account, so a fetch for A can't be written under B (I6, closes D6). |
+| F22 | Logout mid-cycle | Epoch bump + purge tombstone; in-flight commits rejected; the purge completes even mid-page. |
+| **F23** | **Envelope window widened** | Not a resync. `targetFrom` moves back, `phase='scanning'`, job B scans ascending from the new floor to `coveredFrom`. Cursors untouched (§7.5 rule 7). |
+| **F23B** | **Envelope window narrowed** | Evict envelopes (and their bodies, membership, queue rows) below the new floor; `coveredFrom = targetFrom`. Cursors untouched. |
+| **F24** | **Body window widened** | Job **C2** (S9) enqueues bodies for `queryEnvelopes({hasBody: false, receivedAfter: bodyFloor})`. Without C2 this silently did nothing for already-covered envelopes — revision 1's gap. |
+| **F24B** | **Body window narrowed** | Delete bodies below the new body floor and drop their queue entries; envelopes stay, so messages remain listed and openable online. |
+| F25 | MB cap exceeded | Evict **bodies** oldest-first via `listBodiesForEviction` (single-table, `body.received_at`, S12). Envelopes survive. Cursors untouched. Queue entries for evicted-window messages dropped. |
+| **F26** | `updated` for an id we don't hold | **Unconditional no-op** (S16): absent ids are filtered out before the fetch is issued. Absence means retention decided against it, or coverage hasn't reached it — and coverage enumerates current state, so it needs no replay. Revision 1's "let retention decide" wording implied fabricating a `receivedAt` the 3-property response can't supply and `NOT NULL` would reject. |
+| F27 | `destroyed` for an id we never held | No-op. Page still applied, cursor still advances. |
+| **F28** | Delta would revert an unflushed offline mutation | Cannot happen: the durable store holds server truth only and local intent is a **read-time overlay** (§5.6, S11). The delta path has no knowledge of pending ops. |
+| **F29** | Pending `destroy` for a message the delta reports `created`/`updated` | Server state is applied; the overlay hides it from reads; the flush + subsequent `destroyed` removes it. No body is enqueued for a message with a pending destroy. |
+| F30 | Storage write fails (disk full, quota) | Cycle fails immediately, cursor unchanged, error surfaced (I4). Never warn-and-continue (D2). |
+| **F31** | Device clock wrong / DST | No cursor or ordering impact (I8): cursors are opaque server strings, `scanCursor` is a server `receivedAt`. Window boundary effects: F44. |
+| F32 | Corrupt local *record* (unparseable row) | Delete the record, enqueue a re-fetch, log. Do **not** invalidate the cursor — one bad row is not a state problem. (Contrast F43.) |
+| **F33** | Coverage scan makes no forward progress (`receivedAt` tie cluster) | `after` is spec-inclusive (S14), so boundary re-delivery is normal and deduped. Progress requires strictly-greater `max(receivedAt)`; otherwise the `anchor` guard, then — only on `anchorNotFound` — a +1 ms advance with a `WARN` and a durable gap marker (§6.1). Never normal-path. |
+| F34 | Two devices on the same account | Nothing special. Cursors are per-device; each converges. The other device's mutations arrive as ordinary `updated`. |
+| **F35** | User clears the cache from Settings while a cycle runs | `clearRecords()` wipes records **and the body queue** (S12), sets `resyncRequired`, and bumps the epoch (§8.3) — so the in-flight cycle's next commit is rejected and cannot revive `resyncRequired: false` (F37). Cursors are not nulled (§7.5 rule 7). |
+| F36 | `hasMoreChanges: true` with all-empty arrays | Valid page: advance to `newState`, keep draining. Counts against the page budget, so a server doing this forever still terminates. |
+| **F37** | **Concurrent non-cycle write vs. a cycle's commit (S1)** | No whole-struct `AccountSyncState` write exists (I12). Field-level patches, read-merge-write under the per-account mutex, plus the epoch guard. The broken sequence — cycle loads state → user clears cache → cycle writes its stale copy back, yielding an empty store with a live cursor and no resync pending — is unreachable. |
+| **F38** | **Retention widened *during* a reconcile (S2)** | The sweep uses the **pinned** `sweepFloor` from reconcile step 0, never a live `targetFrom`. The widen is stored as `deferredTargetFrom` and applied at step 5, which then re-enters `phase='scanning'` to extend coverage downward. Without pinning, step 4 would delete every record between the old and new floors — permanently, since `coveredFrom` would then claim that range complete and delta sync cannot re-deliver pre-existing mail. |
+| **F39** | **Server echoes a semantically-equal but non-identical `oldState` (S10)** | Re-issue the same call once and compare again; a match is a logged transient anomaly, not an invalidation. Only a confirmed mismatch escalates. Plus the ≤4-reconciles-per-24 h ceiling with a loud log and a persistent UI state (§7.6.1), so this cannot become an unbounded rescan loop that `consecutiveFailures` never sees. |
+| **F40** | **Body fetch returns `notFound` (S12)** | **Dequeue immediately.** The message is gone; the entry can never succeed and would otherwise burn five attempts and leave a row behind. |
+| **F41** | **Body re-enqueued after being dropped (S12)** | `enqueueBodies` is insert-or-ignore and **never resets `attempts`**, so C2 cannot defeat the give-up-after-5 rule by re-enqueuing a permanently failing body. |
+| **F42** | **Offline caching disabled mid-cycle (S13)** | T10: abort at the next page boundary, bump the epoch (so in-flight commits are rejected), then purge (§8.4). Reads for a disabled account never open the store, and `open()` never materialises a file or key (§9.5). |
+| **F43** | **`AccountSyncState` blob unparseable (S15)** | I13: `resyncRequired = true` and every cursor treated as invalidated → reconcile. **Not** a silent fall back to empty cursors, which would leave a store of unverified pre-existing records that no sweep ever visits. |
+| **F44** | **Large device-clock jump when computing the retention floor (S16)** | Guard: if the computed floor moves more than 25 h from `lastWindowFloor`, log a `WARN` and keep the previous floor for eviction and for any sweep until a second, consistent observation. Prevents a skew from triggering a delete-and-redownload of the whole window. Bounded and self-correcting either way, but revision 1's "no correctness impact" was too strong for a feature whose point is having mail offline. |
+| **F45** | **Orphan body rows (S12)** | `putBodyIfEnvelopeExists` prevents most; a periodic `listOrphanBodies` sweep deletes the rest. Otherwise they consume the user's storage cap while being invisible to eviction. |
+| **F46** | **Big backlog, user stays foregrounded (S8)** | T9 reschedules 5 s after a `partial` cycle. Chaining continues only while `madeProgress` is true (§10.3), so a stall is fixed without creating a hot loop. |
+| **F47** | **`Mailbox` drains cleanly while `Email` fails every cycle (S6)** | Failure counters live on `SyncCursor`, not `AccountSyncState`; a cycle counts as `failed` for escalation if **any** job failed. So the Email cursor's ladder escalates on schedule instead of being reset to 0 by the Mailbox cursor's success — the exact wedge revision 1 left reachable. |
+| **F48** | **Body arrives for an envelope destroyed in the same cycle (Part 3)** | I11 (sequential jobs, no interleaved apply) makes it rare; `putBodyIfEnvelopeExists` makes it impossible. This is why "run bodies in parallel, it's separate state" is forbidden. |
+| **F49** | **Reconcile of a wide envelope window takes many cycles (S9)** | Delta goes live at reconcile step 1 and runs every cycle alongside the enumeration; only the sweep is gated on enumeration completion. New mail keeps arriving during a multi-cycle rebuild. |
 
 ---
 
 ## 12. Required changes outside the engine
 
-Not part of the engine, but the engine cannot be correct without them. Each is small.
+### 12.1 `src/api/email.ts` — typed results and branded states
 
-### 12.1 `src/api/email.ts` — typed change results
-
-`getEmailChanges` / `getMailboxChanges` must stop collapsing every error to `null` (D5):
+Stop collapsing every error to `null` (D5, the trigger for D4):
 
 ```ts
 export type JmapMethodErrorType =
   | 'cannotCalculateChanges' | 'serverUnavailable' | 'serverFail' | 'serverPartialFail'
   | 'requestTooLarge' | 'invalidArguments' | 'unknownMethod' | 'forbidden'
-  | 'accountNotFound' | 'accountNotSupportedByMethod' | 'stateMismatch'
+  | 'accountNotFound' | 'accountNotSupportedByMethod' | 'stateMismatch' | 'anchorNotFound'
   | 'unknown';                       // -> ServerTransient by default (§7.1)
 
-export interface JmapMethodError { type: JmapMethodErrorType; description?: string; raw?: unknown; }
+export interface JmapMethodError { type: JmapMethodErrorType; description?: string; raw?: unknown }
 export type JmapResult<T> = { ok: true; value: T } | { ok: false; error: JmapMethodError };
 
+// newState/oldState are ChangesState; nothing else in the codebase can mint one (§3.2).
 export function getEmailChangesResult(
   sinceState: string, opts?: { maxChanges?: number; accountId?: string },
 ): Promise<JmapResult<EmailChangesResult>>;
-
 export function getMailboxChangesResult(
   sinceState: string, opts?: { accountId?: string },
 ): Promise<JmapResult<MailboxChangesResult>>;   // + updatedProperties: string[] | null
 ```
 
-Also needed:
+Also:
 - `MailboxChangesResult` gains `updatedProperties: string[] | null` (§5.2).
 - `getEmailProperties(ids, properties, accountId)` — a generic `Email/get` for the 3-property
-  `updated` path and the envelope tier, without `getEmailsWithState`'s fixed property list and
-  without its `state` return (which must not be used as a cursor, D4/I2).
+  `updated` path and the envelope tier, returning its `state` as a **`SnapshotState`** so it cannot
+  be handed to `advanceCursor` (D4 becomes a compile error).
 - `getMailboxProperties(ids, properties, accountId)` for the `updatedProperties` patch path.
 - `queryEmailWindow({after, before, limit, sort, anchor, anchorOffset, accountId})` for §6.1's
-  keyset scan, returning `{ ids }` (no `queryState` — the engine doesn't use `queryChanges`).
+  keyset scan, returning `{ ids }` and surfacing `anchorNotFound` distinctly.
+- `captureStates(accountId)` — the one-request `Mailbox/get{ids:[]}` + `Email/get{ids:[]}` pair of
+  §4.1, returning branded `SnapshotState`s.
 
-The existing `getEmailChanges`/`getMailboxChanges` can stay as thin wrappers so `email-store` is
-untouched by this step. Fixing D4 in `email-store.ts:885-889` is a separate, small change and
-should be its own commit — it is a real bug in shipped code, independent of this engine.
+The existing `getEmailChanges` / `getMailboxChanges` stay as thin wrappers so `email-store` is
+untouched by this step. **Fixing D4 in `email-store.ts:885-889` is a separate, small commit** — a
+real bug in shipped code, independent of this engine, and worth landing on its own.
 
 ### 12.2 `src/api/jmap-client.ts`
 
-- Parse request-level errors: RFC 8620 §3.6.1 returns HTTP 400 with
-  `application/problem+json` and a `type` URN (`urn:ietf:params:jmap:error:limit` carries
+- Parse request-level errors: RFC 8620 §3.6.1 returns HTTP 400 with `application/problem+json` and a
+  `type` URN (`urn:ietf:params:jmap:error:limit` carries
   `limit: "maxSizeRequest" | "maxCallsInRequest" | "maxConcurrentRequests" | "rateLimit"`).
   `request()` currently throws `new Error("JMAP request failed: " + status)` for any non-2xx
-  (`:442-445`), discarding this. Add `RequestLimitError` / `ServerError` carrying the parsed
-  type so §7.1 can classify.
-- Accept an `AbortSignal` so a cycle can be cut at a page boundary on background/logout, and add
-  a per-request timeout (`secureFetch`'s native path already takes `timeoutMs`; the plain
-  `fetch` path has none, so a hung socket currently hangs a cycle until the OS gives up).
-- Expose `sessionState` from responses (`JMAPResponseBody.sessionState` is already typed,
-  `types.ts:33-36`) for F19.
+  (`:442-445`), discarding it. Add `RequestLimitError` / `ServerError` carrying the parsed type so
+  §7.1 can classify.
+- Accept an `AbortSignal` so a cycle can be cut at a page boundary on background/logout/T10, and add
+  a per-request timeout: `secureFetch`'s native path takes `timeoutMs`, but the plain `fetch` path
+  has none, so a hung socket currently hangs a cycle until the OS gives up.
+- Expose `sessionState` from responses (already typed, `types.ts:33-36`) for F19.
 
 ### 12.3 Stores and UI
 
-- **New** `src/stores/sync-status-store.ts` — phase/progress/error for the banner, an observer of
-  the engine, never an input to it.
-- `offline-cache-store.ts` — its `SyncState`/`SyncPhase` and the record cache are superseded.
+- **New** `src/stores/sync-status-store.ts` — phase/progress/error for the banner; an observer of the
+  engine, never an input to it.
+- **New** `src/sync/overlay.ts` — the pure read-time local-mutation overlay (§5.6). Its arrival
+  **deletes** `email-store.ts:38-41`'s `patchCache()` write-through and
+  `offline-cache-store.patch()`; optimistic state is no longer written into the durable store at
+  all. `dropFromCache()` (`email-store.ts:42-44`) likewise goes: a queued `destroy` is hidden by the
+  overlay and removed for real when `Email/changes` reports it.
+- `outbox-store.ts` — **no persistence change needed** (§5.6 removes the atomicity requirement
+  revision 1 created). It needs one addition: a selector for "all pending ops for this account,
+  keyed by email id", cheap enough to call on every read path.
+- `offline-cache-store.ts` — its `SyncState`/`SyncPhase` and record cache are superseded.
   `OfflineCacheBanner` needs the new phases (`bootstrapping`, `delta`, `bodies`, `resyncing`,
-  `partial`) mapped onto its existing five. `AboutDataSettings` gains "envelopes / bodies" split
-  stats and a "re-sync now" action (sets `resyncRequired`).
-- `email-store.ts` — cache-seed and offline-fallback reads move to `SyncStore.queryEnvelopes`
-  (§5.7). No change to its `queryChanges` path.
-- `src/lib/offline-sync.ts` — deleted; `formatBytes` (`:150-155`) moves to a util, it is imported
-  by `OfflineCacheBanner:10` and `AboutDataSettings:12`.
+  `partial`) mapped onto its existing five. `AboutDataSettings` gains an envelope/body split, a
+  "re-sync now" action, and the §8.4 confirmation on disabling.
+- `email-store.ts` — cache-seed (`:646-663`) and offline-fallback (`:941-961`) reads move to
+  `SyncStore.queryEnvelopes` + the overlay, gated by §9.5's enabled check. Its `queryChanges` path is
+  unchanged.
+- `src/lib/offline-sync.ts` — deleted; `formatBytes` (`:150-155`) moves to a util (imported by
+  `OfflineCacheBanner:10`, `AboutDataSettings:12`).
+- `settings-store.ts` — `offlineCacheDays` splits into `offlineEnvelopeDays` / `offlineBodyDays`
+  (§2.1).
 
 ---
 
 ## 13. Test plan
 
-The `[QA]` gate for this step. `apply.ts` being pure (§2.2) is what makes most of this cheap.
+The `[QA]` gate for this step. `apply.ts` and `overlay.ts` being pure is what makes most of it cheap.
 
 **Unit, no network (vitest, the repo's existing runner):**
-- Every row of §11 that is expressible as `apply(localState, page, fetched) → mutations`:
-  F7, F8, F11, F26, F27, F28, F29, F36, plus §5.4's create/update/destroy overlap ordering.
-- Cursor state machine: all seven rules of §7.5, especially rule 3 (empty page advances) and
-  rule 5 (a `get` `state` is rejected as a cursor — the D4 regression test).
+- Every §11 row expressible as `apply(localState, page, fetched) → mutations`: F7, F8, F11, F26, F27,
+  F36, F48, plus §5.4's create/update/destroy overlap ordering.
+- Overlay: F28/F29 as pure `applyPendingOps` cases.
+- Cursor state machine: all eight rules of §7.5. **Per S5 the D4 regression test is now a type-level
+  test** (`advanceCursor` must not accept a `SnapshotState`) *plus* a runtime test that the seed path
+  requires an `EnumerationCommitment`. Revision 1's test — "a `get` state is rejected as a cursor" —
+  was itself wrong, since bootstrap and reconcile legitimately seed from one; that is precisely how
+  the literal rule would have been bypassed at the one call site that matters.
 - `classify()` over the whole §7.1 taxonomy, including the unknown-type default (F16).
+- Escalation ladder: monotonic shrink, per-cursor counters, "any job failed ⇒ cycle failed" (F47).
 - Backoff: monotonic, jittered, capped, `Retry-After` override.
-- Retention: F23–F25 window widen/narrow/cap.
+- Retention: F23/F23B/F24/F24B/F25, and the F44 clock-jump guard.
+- Reconcile floor pinning (F38) and the reconcile ceiling (F39) as pure state-machine tests.
+- `SyncStore` **contract tests run against both backends** (`store-memory`, `store-sqlite`),
+  including the S1 lost-update sequence (F37) and `clearRecords` clearing the body queue (F35).
 
-**Integration against the `integration/` Stalwart fixture** (docker-compose, alice/bob/carol —
-reuse it, per the skill's pre-flight; no new backend):
-- Bootstrap → deliver mail *during* the coverage scan → assert the first delta cycle picks it up.
-  This is the §4.1 ordering test and the highest-value test in the list.
-- Multi-page drain with `maxChanges` forced to 2; kill the process between pages (SIGKILL, not a
-  graceful abort); relaunch; assert convergence and no duplicate or missing records (F1).
-- Flag toggle from a second client → assert the local envelope's `keywords` updates and **no body
-  refetch occurs** (network assertion, not just a state assertion — this is D1/§5.3).
+**Integration against a real Stalwart.** Note the honest cost (S16): the docker-compose
+`integration/` fixture with alice/bob/carol lives in the **sibling `vncmail-plus` repo**, not this
+one. "Reuse it" means either a cross-repo checkout in this repo's CI or lifting the compose file
+here — a real setup cost to budget, not a free reuse. Cases:
+- Bootstrap → deliver mail *during* the coverage scan → assert the first delta cycle picks it up. The
+  §4.1 ordering test, and the highest-value test in the list.
+- Multi-page drain with `maxChanges` forced to 2; `SIGKILL` between pages; relaunch; assert
+  convergence with no duplicates or omissions (F1).
+- Flag toggle from a second client → assert the local envelope's `keywords` update and **no body
+  refetch occurs** (a network assertion, not just a state assertion — D1/§5.3).
 - Mailbox delete with `onDestroyRemoveEmails` both true and false (F7).
-- Force `cannotCalculateChanges` (stale `sinceState`) → assert reconcile runs, records stay
-  readable throughout, and the sweep deletes exactly the server-absent ids (F9/§7.6).
-- Airplane-mode read path + two-account isolation, per the skill's step 8 smoke test.
-- Purge: kill mid-purge, relaunch, assert no records remain and no cursor survives (F4/F22).
+- Force `cannotCalculateChanges` (stale `sinceState`) → assert reconcile runs, records stay readable
+  throughout, delta keeps flowing during the enumeration (F49), and the sweep deletes exactly the
+  server-absent ids (F9).
+- **Widen retention mid-reconcile** → assert nothing in the gap is deleted and the widen is applied
+  after the sweep (F38). This is the test for the design's worst potential data-loss bug.
+- Airplane-mode read path + two-account isolation (skill step 8's smoke test), plus an explicit
+  regression for D6: switch accounts mid-fetch, assert no row lands under the wrong account.
+- Purge: kill mid-purge, relaunch, assert no records and no surviving cursor (F4/F22).
 
-**Property/fuzz (cheap, high yield here):** generate random change pages (with legal overlaps
-per §5.4) and random kill points; assert the local store converges to the same state as a
-from-scratch bootstrap. This is the test that finds ordering bugs no hand-written case will.
+**Property/fuzz (cheap, high yield):** generate random legal change pages (with §5.4's permitted
+overlaps) and random kill points; assert the local store converges to the same state as a
+from-scratch bootstrap. This is what finds ordering bugs no hand-written case will.
 
 ---
 
 ## 14. Rollout and migration
 
-1. **Discard, don't migrate.** On first run of the new engine, delete the
-   `webmail:offline-cache:{index,entry}:v2:*` namespace and bootstrap fresh. The old cache is
-   unencrypted JSON with stale keywords (D1) and no cursor; a single sync rebuilds it. Migrating
-   would mean trusting records whose provenance we can't establish.
+1. **Discard, don't migrate.** On first run, delete the `webmail:offline-cache:{index,entry}:v2:*`
+   namespace and bootstrap fresh. The old cache is unencrypted JSON with stale keywords (D1) and no
+   cursor; one sync rebuilds it. Migrating would mean trusting records whose provenance we can't
+   establish.
 2. **Feature flag** `offlineSyncEngineV2` in `settings-store`, default off, so the old path stays
-   available during dogfood. Both must not run concurrently — the flag gates trigger
-   registration in `App.tsx`, not just the engine body.
-3. **Order of work:** `SyncStore` + AsyncStorage backend and `apply.ts` first (fully unit-tested
-   with no engine), then cursors/drain, then coverage, then bodies, then triggers, then UI. The
-   Android emulator smoke gate (`.github/workflows/android-emulator-smoke.yml`) must stay green
-   at every step.
-4. **Then step 6** swaps the backend. If that swap requires touching anything under `src/sync/`
-   other than `store*.ts`, the boundary of §9 was drawn wrong and should be fixed rather than
-   worked around.
+   available during dogfood. The flag gates trigger registration in `App.tsx`, not just the engine
+   body, so the two can never run concurrently.
+3. **Order of work — revised per S4.** SQLite comes *before* the engine:
+   1. **Plain `expo-sqlite`** (no SQLCipher): the §9.3 schema, `store-sqlite.ts`, `store-memory.ts`,
+      and the `SyncStore` contract tests that run against both. This is the part of skill step 6 that
+      does not need the step-7 key decision, and it keeps Expo Go working (manual §4: only
+      `useSQLCipher` is incompatible).
+   2. `apply.ts` + `overlay.ts` + `errors.ts` + `states.ts`, fully unit-tested with no engine.
+   3. Cursors and the delta drain (jobs A1/A2).
+   4. Coverage (job B) and the bootstrap sequence.
+   5. Bodies (C1, C2).
+   6. Triggers, then UI.
+   7. **Later, separately:** flip `useSQLCipher` once step 7's key-lifecycle decision is signed off.
+      Because §14.1 already discards and rebuilds, the file-format change is a purge +
+      re-bootstrap, not a migration.
 
-**Adjacent, flagged for the human, not acted on here:** `app.config.js` currently declares
-`ios.config.usesNonExemptEncryption: false`, which must flip when SQLCipher ships in the iOS
-binary (skill step 13). And `git ls-files` shows `android/` **is** tracked in this repo while
-`.gitignore` ignores only `/ios` — which sits uneasily with the manual §4 "stay CNG, don't commit
-`ios`/`android`" decision, and will matter at step 6 when the `expo-sqlite` plugin has to
-regenerate the Android project. Both are step-6 concerns, neither affects this design.
+   Two consequences to record, since this reorders the skill: it moves *part* of step 6 ahead of
+   step 5 (the human should note this in the skill's status log), and it makes step 6's remaining
+   work the encryption flip alone. In exchange, D3 is actually fixed, S1's atomicity becomes a real
+   transaction rather than a discipline, and there is no throwaway AsyncStorage backend.
+
+   The Android emulator smoke gate (`.github/workflows/android-emulator-smoke.yml`) must stay green
+   at every sub-step.
+4. **If step 3.1 stalls**, §9.2's contingency applies: an AsyncStorage backend with its limits
+   stated, D3 left open, and the per-account mutex load-bearing.
 
 ---
 
 ## 15. Summary of key decisions
 
-1. **Three independent state machines** — delta cursor, historical coverage, body queue — each
-   with its own persisted state. This is what lets the cursor advance while bodies lag, makes a
-   retention change not look like a resync, and caps crash cost at one unit of work per machine.
+1. **Three state machines** — delta cursor, envelope coverage, bodies (queue **plus** backfill) —
+   each with its own persisted state, **but serialised within an account (I11)**, not concurrent.
+   The separation is what lets the cursor advance while bodies lag; the serialisation is what keeps
+   it safe.
 2. **Bootstrap: replace the code, keep the shape.** Still a query-driven bulk scan, because
-   `/changes` structurally cannot deliver pre-existing mail — but rewritten, because
-   `runOfflineSync` captures no cursor (a permanent, silent gap), cannot page stably, cannot
-   resume, and fetches at the wrong granularity.
-3. **Capture cursors *before* enumerating** (§4.1). Errs toward re-delivering changes, never
-   toward gaps. The reverse order is cheaper and silently loses mail.
-4. **An `updated` Email costs a 3-property fetch, never a body.** RFC 8621 §4.1: `keywords` and
-   `mailboxIds` are the only mutable properties. Largest efficiency win over today, and it fixes
-   the shipped bug where offline read/unread state is permanently wrong (D1).
-5. **Cursor-last, always** (I1). A crash re-delivers a page; it never skips one. Under
-   AsyncStorage this is enforced by write ordering; under SQLite it becomes a real transaction,
-   with no engine change.
-6. **Only a `Foo/changes.newState` may become a cursor** (I2). Not an `Email/get` `state`, not a
-   `queryState`, not a pushed `StateChange` value. Each of those would silently skip changes, and
-   the first is a live bug in `email-store.ts:885-889` today (D4).
-7. **Failure means the cursor stands still.** Exactly one error class moves it, and that class's
-   action is a verified full rebuild. Everything else retries from the same point.
-8. **`cannotCalculateChanges` is handled as the spec mandates, without blanking the UI** (§7.6):
-   the cache is invalidated and every record is re-verified or deleted, but deletion happens at
-   the *end* of reconciliation, so an offline user isn't left with an empty inbox. Documented as a
-   deliberate deviation from a literal "delete first" reading.
-9. **No error path can wedge an account** (I10/§7.7). Five failed cycles on the same state
-   escalates through halved `maxChanges` → no `maxChanges` → full reconcile, which is always
-   achievable from cold.
-10. **Records are never deleted by inference** (I7). Only `destroyed`, retention, the reconcile
-    sweep, or purge. Consequently: no FK from email→mailbox, and no cascade.
-11. **Everything is keyed by `(LocalAccountId, JmapAccountId, CursorType)`,** and no sync state
-    lives in a global key — so step 6's per-account SQLCipher wipe removes cursors and records
-    together. A cursor surviving a data wipe is the worst reachable state, and §8.1 + §8.4 make it
-    unreachable.
-12. **Single-flight with coalescing, never abort-to-serve** (§10.3), fixing today's "Sync now
-    during a sync cancels the sync" behaviour (D7).
-13. **Push is a wake signal, not a cursor** (§10.4). Mobile will consume the same JMAP WebSocket
-    the Electron client uses — foreground only, as a transport swap behind
-    `onStateChange(StateChange)`; background stays on the relay. Zero engine lines change when
-    the transport does.
-14. **The engine talks only to `SyncStore`** (§9). If step 6 requires editing anything under
-    `src/sync/` besides `store*.ts`, the boundary was drawn wrong.
+   `/changes` cannot deliver pre-existing mail — but rewritten, because `runOfflineSync` captures no
+   cursor, can't page stably, can't resume, and fetches at the wrong granularity.
+3. **Capture cursors *before* enumerating** (§4.1). Errs toward re-delivery, never toward gaps.
+4. **An `updated` Email costs a 3-property fetch, never a body**, and is a **no-op when the record is
+   absent**. RFC 8621 §4.1. Largest efficiency win, and it fixes the shipped bug where offline
+   read/unread state is permanently wrong (D1).
+5. **Cursor-last, always** (I1). A crash re-delivers a page; it never skips one. Under SQLite this is
+   a real transaction.
+6. **Cursor provenance is an ordering rule with type-level teeth** (I2, §3.2). A `Foo/changes`
+   `newState` advances a cursor; a `Foo/get` `state` may seed one *only* inside an
+   `EnumerationCommitment`. Revision 1's "only a changes state, ever" was false — the design's own
+   bootstrap violated it — and a rule the design violates is a rule that gets bypassed exactly where
+   it matters (D4).
+7. **Failure means the cursor stands still.** One error class of seven moves it, and its action is a
+   verified rebuild.
+8. **`cannotCalculateChanges` is handled as mandated, without blanking the UI, with a pinned sweep
+   floor, and without stalling delta sync** (§7.6). The floor pinning (S2) is what stops a
+   mid-reconcile retention widen from permanently deleting mail; going live at seed time (S9) is what
+   stops a wide-window rebuild from blocking incoming mail for hours.
+9. **No error path can wedge an account** (I10). Per-cursor counters (S6) so one healthy cursor can't
+   mask another's wedge, a **monotonically shrinking** `maxChanges` ladder (S7), a confirmed
+   `oldState` mismatch before escalating plus a reconcile ceiling (S10).
+10. **Records are never deleted by inference** (I7): only `destroyed`, retention, the pinned sweep, or
+    purge. Hence no email→mailbox FK and no cascade.
+11. **Everything is keyed by account — including the SQL primary keys** (S3). JMAP ids are unique
+    only within an account, and no sync state lives in a global key, so step 6's per-account wipe
+    removes cursors and records together.
+12. **Local mutations are a read-time overlay, not a write-through** (S11). The durable store holds
+    server truth only; the outbox stays the single durable record of intent. This deletes the
+    atomicity requirement rather than guarding it.
+13. **Single-flight with coalescing, never abort-to-serve** (D7), **plus a resume trigger for
+    unfinished work** with progress-gated chaining (S8).
+14. **Push is a wake signal, not a cursor.** Mobile will consume the same JMAP WebSocket as Electron
+    — foreground only, behind `onStateChange(StateChange)`; background stays on the relay.
+15. **SQLite ships before the engine** (S4), plain first and encrypted later — which fixes D3 for
+    real, makes S1's atomicity a database property, and defers the human-gated key decision.
+16. **Disabling offline caching purges** that account's store (S13), and a disabled account's store is
+    never materialised at all (§9.5).
+
+**On two fixes implemented differently from the review's suggestion**, both by removing the failure
+mode rather than guarding it: S11 (read-time overlay instead of an atomic write-through — no
+cross-store transaction needed, and the "delta reverts a local change" mode ceases to exist) and
+S7's third rung (dropped rather than reordered, since the RFC ambiguity that justified it could not
+be substantiated by either the reviewer or me). Neither weakens the property the finding was
+protecting.
 
 ### Open questions for the human
 
-Deliberately few — this pass was meant to be decisive. Everything else above is a made decision,
-and the reviewer should attack the decisions rather than expect optional slots.
+1. **Concrete retention defaults.** The split into `offlineEnvelopeDays` / `offlineBodyDays` and the
+   decision that envelopes ≫ bodies are settled; the *numbers* are not recorded anywhere this pass
+   could read. Two constants in `settings-store.ts`; the design is value-independent.
+2. **`offlineCacheEnabled` default.** Recorded as **staying `false`** per the earlier decision, and
+   §9.5 now guarantees a disabled account materialises nothing. Flagged only because §8.4's
+   purge-on-disable makes the toggle destructive, so its Settings copy needs to say so.
+3. **The skill's step order.** §14.3 moves plain `expo-sqlite` (part of step 6) ahead of step 5.
+   Worth a line in the `VNCprodbuild` status log so the next session doesn't re-derive it.
 
-1. **Envelope-window default.** §2.1 sets envelope window = body window = `offlineCacheDays`
-   (default 7) so v1 changes no user-visible behaviour. Envelopes are ~1 KB, so "envelopes: 1
-   year, bodies: 30 days" is affordable and would make offline search (step 9) far more useful.
-   Product call, not a technical one; the schema supports either today.
-2. **Whether `offlineCacheEnabled` should still default to `false`.** With tiered storage and
-   incremental sync, the cost of leaving it on is a few hundred KB and a handful of requests per
-   day — very different from today's bulk re-download. Turning it on by default is what makes the
-   feature actually reach users, but it is a data-usage default and therefore the human's call.
+None blocks implementation.
 
-Neither blocks implementation: (1) is one constant, (2) is one boolean.
+---
+
+## 16. Note: `android/` vs. Continuous Native Generation (review Part 4)
+
+Flagged, deliberately **not resolved here** — this is a program-level decision, not a sync-design
+one, and it predates this document.
+
+The manual's §4 decision was to stay Continuous Native Generation (don't commit `ios`/`android`, let
+`expo prebuild` regenerate them). In this repo that has already been broken: `.gitignore` ignores
+only `/ios`, and `android/` is tracked and contains hand-written Kotlin (FCM push modules, a
+client-cert module, notification-tap storage) that no Expo config plugin generates, plus
+`google-services.json` and a debug keystore. `expo prebuild --clean` — which step 6's `useSQLCipher`
+plugin needs — would destroy all of it.
+
+This design does not create the conflict and does not depend on how it is resolved; it will collide
+with it at §14.3's step 3.7 (the SQLCipher flip), **not** at step 3.1, since plain `expo-sqlite`
+needs no config-plugin prebuild. The two options for the human at that point: port the Kotlin
+modules into a local Expo config plugin (restoring real CNG), or formally abandon CNG for Android and
+accept hand-maintained native there. Also worth recording then: `app.config.js`'s
+`ios.config.usesNonExemptEncryption: false` must flip once SQLCipher ships in the iOS binary (skill
+step 13).
