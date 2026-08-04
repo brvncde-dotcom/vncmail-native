@@ -59,15 +59,37 @@ interface OutboxState {
 
   setAccount: (accountId: string | null) => Promise<void>;
   hydrate: () => Promise<void>;
-  enqueue: (op: OutboxOp) => void;
+  /**
+   * Awaits the durable write and REJECTS if it fails (design §5.6.1 / V1).
+   *
+   * This used to be `(op) => void` with a fire-and-forget `persist()`, which was
+   * survivable while the offline cache also held an optimistic copy. It is not
+   * survivable under §5.6's read-time overlay: that design makes this queue the
+   * SOLE durable record of local intent, so a lost write is a silently lost
+   * mutation with no second copy to recover it from. A failed enqueue must reach
+   * the caller so the UI can say "couldn't save that change" rather than showing
+   * an optimistic state that no longer exists anywhere.
+   */
+  enqueue: (op: OutboxOp) => Promise<void>;
   count: () => number;
   pendingForEmail: (emailId: string) => OutboxEntry[];
   flush: () => Promise<void>;
   clear: () => Promise<void>;
 }
 
-function persist(accountId: string, entries: OutboxEntry[]): void {
-  void AsyncStorage.setItem(storageKey(accountId), JSON.stringify(entries)).catch((err) => {
+// Propagates rejection instead of `void …catch(warn)`. That pattern is exactly
+// what defect D2 catalogues in offline-cache-store, and the sync design's I4
+// ("no silent write loss") bans it in the sync path — of which this queue is now
+// a part in everything but name.
+async function persist(accountId: string, entries: OutboxEntry[]): Promise<void> {
+  await AsyncStorage.setItem(storageKey(accountId), JSON.stringify(entries));
+}
+
+// For the internal mutate-and-persist helpers, which run inside flush() and have
+// no caller to raise to. A failure there is recoverable — the entry is still in
+// memory and the next persist rewrites the whole list — so log rather than throw.
+function persistBestEffort(accountId: string, entries: OutboxEntry[]): void {
+  void persist(accountId, entries).catch((err) => {
     console.warn('[outbox] persist failed', err);
   });
 }
@@ -132,11 +154,12 @@ export const useOutboxStore = create<OutboxState>((set, get) => ({
     set({ entries, hydrated: true });
   },
 
-  enqueue: (op) => {
+  enqueue: async (op) => {
     const accountId = get().activeAccountId;
     if (!accountId) {
-      console.warn('[outbox] enqueue with no active account; dropping op', op.kind);
-      return;
+      // Silently dropping this was tolerable when the cache held a copy; now it
+      // is the only record, so the caller has to know.
+      throw new Error(`[outbox] enqueue with no active account; refusing to drop ${op.kind}`);
     }
     let entries = [...get().entries];
     // Message identity is (account, id): JMAP ids are only unique within an
@@ -163,8 +186,17 @@ export const useOutboxStore = create<OutboxState>((set, get) => ({
       }
     }
 
+    // Publish optimistically so the UI updates without a round-trip to storage,
+    // but AWAIT the write and roll the in-memory list back if it fails — a queue
+    // that claims an op it did not persist is the failure mode V1 identified.
+    const previous = get().entries;
     set({ entries });
-    persist(accountId, entries);
+    try {
+      await persist(accountId, entries);
+    } catch (err) {
+      if (get().activeAccountId === accountId) set({ entries: previous });
+      throw err;
+    }
   },
 
   count: () => get().entries.length,
@@ -237,7 +269,7 @@ function removeEntry(accountId: string, id: string): void {
   if (store.activeAccountId !== accountId) return;
   const entries = store.entries.filter((e) => e.id !== id);
   useOutboxStore.setState({ entries });
-  persist(accountId, entries);
+  persistBestEffort(accountId, entries);
 }
 
 function recordError(accountId: string, id: string, err: unknown, incrementAttempt: boolean): void {
@@ -250,7 +282,7 @@ function recordError(accountId: string, id: string, err: unknown, incrementAttem
       : e,
   );
   useOutboxStore.setState({ entries });
-  persist(accountId, entries);
+  persistBestEffort(accountId, entries);
 }
 
 // ── Public entry points used by the email-store mutations ───────────────────
@@ -287,8 +319,11 @@ export async function applyOrQueueBatch(
     }
   }
 
-  for (const op of ops) store.enqueue(op);
-  if (online) void store.flush();
+  // AWAIT every enqueue before reporting success (V1). Previously this returned
+  // `{ queued: true }` — and the UI reported success — with nothing on disk, so a
+  // kill in that window lost the mutation silently.
+  for (const op of ops) await useOutboxStore.getState().enqueue(op);
+  if (online) void useOutboxStore.getState().flush();
   return { queued: true };
 }
 
