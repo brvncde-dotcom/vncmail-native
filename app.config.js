@@ -62,6 +62,16 @@ module.exports = {
     },
     plugins: [
       'expo-secure-store',
+      // A strict no-op with no props: every property the plugin writes is gated
+      // on `value !== undefined` (see node_modules/expo-sqlite/plugin/src/withSQLite.ts).
+      // Listed anyway because `expo install expo-sqlite` asks for it, and because
+      // this is where the SQLCipher flip goes when the key-lifecycle decision is
+      // signed off: ['expo-sqlite', { useSQLCipher: true }]. Setting ANY prop here
+      // (useSQLCipher, enableFTS, customBuildFlags, useLibSQL, withSQLiteVecExtension)
+      // makes the native build compile SQLite from source instead of consuming the
+      // prebuilt AAR, which is exactly what costs Expo Go compatibility. FTS5 is
+      // already on by default, so step 9 must NOT set enableFTS.
+      'expo-sqlite',
       '@react-native-community/datetimepicker',
       'expo-localization',
       [
