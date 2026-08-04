@@ -822,6 +822,7 @@ export const useEmailStore = create<EmailState>()(
           let updatedIds: string[] = [];
           let destroyedExtra: string[] = [];
           let nextEmailState: string | undefined = emailState;
+          let emailChangesInvalid = false;
           if (emailState) {
             const ec = await getEmailChanges(emailState, undefined, ref.accountId);
             if (ec) {
@@ -829,75 +830,88 @@ export const useEmailStore = create<EmailState>()(
               destroyedExtra = ec.destroyed;
               nextEmailState = ec.newState;
             } else {
-              // cannotCalculateChanges → forget the state and rely on the
-              // next full re-sync to repopulate it.
-              nextEmailState = undefined;
+              // cannotCalculateChanges (RFC 8620 §5.2): the cursor can no
+              // longer be advanced incrementally. Per cursor provenance, only
+              // a genuine Email/changes `newState` may ever become the next
+              // cursor — an Email/get `state` token means something
+              // different and must never be adopted as a substitute (D4).
+              // Forget the cursor and fall through to the full re-query
+              // below, which performs the mandated resync and reestablishes
+              // a cursor from a fresh Email/get bootstrap.
+              emailChangesInvalid = true;
             }
           }
 
-          // Fetch only what we don't already have. `addedIds` are new to the
-          // window; `updatedIds` may already be in the base list but their
-          // keywords/mailboxIds need refreshing.
-          const existingById = new Map(baseEmails.map((e) => [e.id, e]));
-          const idsToFetch = [
-            ...addedIds.filter((id) => !existingById.has(id)),
-            ...updatedIds.filter((id) => existingById.has(id)),
-          ];
-          let fetchState: string | undefined;
-          let fetched: Email[] = [];
-          if (idsToFetch.length > 0) {
-            const res = await getEmailsWithState(idsToFetch, ref.accountId);
-            fetched = res.list;
-            fetchState = res.state;
-          }
+          if (!emailChangesInvalid) {
+            // Fetch only what we don't already have. `addedIds` are new to the
+            // window; `updatedIds` may already be in the base list but their
+            // keywords/mailboxIds need refreshing.
+            const existingById = new Map(baseEmails.map((e) => [e.id, e]));
+            const idsToFetch = [
+              ...addedIds.filter((id) => !existingById.has(id)),
+              ...updatedIds.filter((id) => existingById.has(id)),
+            ];
+            let fetchState: string | undefined;
+            let fetched: Email[] = [];
+            if (idsToFetch.length > 0) {
+              const res = await getEmailsWithState(idsToFetch, ref.accountId);
+              fetched = res.list;
+              fetchState = res.state;
+            }
 
-          // Rebuild the visible window order: start with existing emails,
-          // drop removed/destroyed, then splice added at their indices.
-          const allDestroyed = new Set([...destroyedExtra, ...removed]);
-          const kept = baseEmails.filter((e) => !allDestroyed.has(e.id));
-          // Map updated entries onto kept array
-          const fetchedById = new Map(fetched.map((e) => [e.id, e]));
-          const updatedKept = kept.map((e) => fetchedById.get(e.id) ?? e);
+            // Rebuild the visible window order: start with existing emails,
+            // drop removed/destroyed, then splice added at their indices.
+            const allDestroyed = new Set([...destroyedExtra, ...removed]);
+            const kept = baseEmails.filter((e) => !allDestroyed.has(e.id));
+            // Map updated entries onto kept array
+            const fetchedById = new Map(fetched.map((e) => [e.id, e]));
+            const updatedKept = kept.map((e) => fetchedById.get(e.id) ?? e);
 
-          // Insert added entries at the indices the server gave us. Sort
-          // ascending by index so each splice lands at the right offset.
-          const sortedAdded = [...queryChanges.added].sort((a, b) => a.index - b.index);
-          const out = [...updatedKept];
-          for (const entry of sortedAdded) {
-            const email = fetchedById.get(entry.id);
-            if (!email) continue;
-            const idx = Math.min(entry.index, out.length);
-            out.splice(idx, 0, email);
-          }
-          // Cap the visible list to the user's page size — Email/queryChanges
-          // can push entries past the original window if many were added.
-          const trimmed = out.slice(0, Math.max(limit, out.length));
+            // Insert added entries at the indices the server gave us. Sort
+            // ascending by index so each splice lands at the right offset.
+            const sortedAdded = [...queryChanges.added].sort((a, b) => a.index - b.index);
+            const out = [...updatedKept];
+            for (const entry of sortedAdded) {
+              const email = fetchedById.get(entry.id);
+              if (!email) continue;
+              const idx = Math.min(entry.index, out.length);
+              out.splice(idx, 0, email);
+            }
+            // Cap the visible list to the user's page size — Email/queryChanges
+            // can push entries past the original window if many were added.
+            const trimmed = out.slice(0, Math.max(limit, out.length));
 
-          const nextQueryState = queryChanges.newQueryState;
-          const nextTotal = queryChanges.total;
+            const nextQueryState = queryChanges.newQueryState;
+            const nextTotal = queryChanges.total;
 
-          if (viewChanged()) return;
+            if (viewChanged()) return;
 
-          set({
-            emails: trimmed,
-            totalEmails: nextTotal,
-            queryState: nextQueryState,
-            emailStates: withEmailState(
-              get().emailStates,
-              ref.accountId,
-              nextEmailState ?? fetchState ?? emailState,
-            ),
-            loading: false,
-            mailboxSnapshots: {
-              ...get().mailboxSnapshots,
-              [currentMailboxId]: {
-                emails: trimmed,
-                total: nextTotal,
-                queryState: nextQueryState,
+            set({
+              emails: trimmed,
+              totalEmails: nextTotal,
+              queryState: nextQueryState,
+              emailStates: withEmailState(
+                get().emailStates,
+                ref.accountId,
+                // `nextEmailState` is only ever a genuine Email/changes
+                // newState here; `fetchState` only fills in as a bootstrap
+                // token when there was no prior cursor at all (`emailState`
+                // falsy), never as a substitute for an invalidated one.
+                nextEmailState ?? fetchState ?? emailState,
+              ),
+              loading: false,
+              mailboxSnapshots: {
+                ...get().mailboxSnapshots,
+                [currentMailboxId]: {
+                  emails: trimmed,
+                  total: nextTotal,
+                  queryState: nextQueryState,
+                },
               },
-            },
-          });
-          return;
+            });
+            return;
+          }
+          // emailChangesInvalid → fall through to the full re-query below.
         }
         // queryChanges === null → cannotCalculateChanges. Drop our queryState
         // and fall through to a full re-query, which will repopulate it.

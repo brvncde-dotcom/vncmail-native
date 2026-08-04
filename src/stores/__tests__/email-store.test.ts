@@ -120,6 +120,7 @@ const mockQueryEmails = emailApi.queryEmails as ReturnType<typeof vi.fn>;
 const mockGetEmailQueryChanges = emailApi.getEmailQueryChanges as ReturnType<typeof vi.fn>;
 const mockGetEmails = emailApi.getEmails as ReturnType<typeof vi.fn>;
 const mockGetEmailsWithState = emailApi.getEmailsWithState as ReturnType<typeof vi.fn>;
+const mockGetEmailChanges = emailApi.getEmailChanges as ReturnType<typeof vi.fn>;
 const mockGetFullEmail = emailApi.getFullEmail as ReturnType<typeof vi.fn>;
 const mockSetKeywords = emailApi.setEmailKeywords as ReturnType<typeof vi.fn>;
 const mockMoveEmail = emailApi.moveEmail as ReturnType<typeof vi.fn>;
@@ -460,6 +461,50 @@ describe('email-store', () => {
       expect(state.emails).toEqual(base);
       expect(state.mailboxSnapshots['mb-1'].emails).toEqual(base);
       expect(state.mailboxSnapshots['mb-1'].queryState).toBe('q-new');
+    });
+  });
+
+  // D4: an Email/get `state` token means something different from an
+  // Email/changes `newState` and must never be adopted as a substitute
+  // cursor. On cannotCalculateChanges (getEmailChanges resolving null), the
+  // incremental path must drop the stale cursor and fall through to a full
+  // re-query rather than quietly re-priming it from Email/get.
+  describe('Email/changes cursor provenance (D4)', () => {
+    const base = [
+      { id: 'e1', subject: 'One' } as any,
+      { id: 'e2', subject: 'Two' } as any,
+    ];
+
+    it('drops the cursor and falls through to a full re-query on cannotCalculateChanges', async () => {
+      useEmailStore.setState({
+        currentMailboxId: 'mb-1',
+        emails: base,
+        totalEmails: 2,
+        searchQuery: '',
+        filters: {},
+        emailStates: { '@primary': 'em-old-cursor' },
+        mailboxSnapshots: { 'mb-1': { emails: base, total: 2, queryState: 'q-base' } },
+      });
+      mockGetEmailQueryChanges.mockResolvedValue({
+        oldQueryState: 'q-base',
+        newQueryState: 'q-2',
+        total: 2,
+        removed: [],
+        added: [],
+      });
+      mockGetEmailChanges.mockResolvedValue(null); // cannotCalculateChanges
+      mockQueryEmails.mockResolvedValue({ ids: ['e1', 'e2'], total: 2, queryState: 'q-full-resync' });
+      mockGetEmailsWithState.mockResolvedValue({ list: base, state: 'em-full-bootstrap' });
+
+      await useEmailStore.getState().refreshEmails();
+
+      // Must not return early from the incremental branch with a
+      // substituted cursor — it falls through to the full re-query.
+      expect(mockQueryEmails).toHaveBeenCalled();
+      const state = useEmailStore.getState();
+      expect(state.emailStates['@primary']).not.toBe('em-old-cursor');
+      expect(state.emailStates['@primary']).toBe('em-full-bootstrap');
+      expect(state.mailboxSnapshots['mb-1'].queryState).toBe('q-full-resync');
     });
   });
 
