@@ -20,7 +20,7 @@
  * registry's mirrored value purges and re-bootstraps (§8.4.1) — §14.1 already
  * specifies discard-and-rebuild, so there is no migration path to maintain.
  */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /** Plain expo-sqlite. `sqlite-cipher` is the later, human-gated flip (§14.3 step 3.7). */
 export const STORE_FORMAT = 'sqlite-plain' as const;
@@ -64,11 +64,19 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
    )`,
   `CREATE INDEX IF NOT EXISTS body_received ON body(jmap_account_id, received_at ASC)`,
 
+  // `gave_up` is what makes a body-tier TERMINAL STATE durable. Deleting the row on
+  // give-up was not enough: job C2's driver is `queryEnvelopes({hasBody: false})`,
+  // which cannot tell "not fetched yet" from "deliberately not kept", so the next
+  // pass re-inserted a fresh `attempts: 0` row and a permanently-failing body retried
+  // five times per cycle, forever. Keeping the row with a flag is what closes that.
   `CREATE TABLE IF NOT EXISTS body_queue (
      jmap_account_id TEXT NOT NULL, email_id TEXT NOT NULL, received_at TEXT NOT NULL,
      attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER, last_error TEXT,
+     gave_up INTEGER NOT NULL DEFAULT 0, gave_up_reason TEXT,
      PRIMARY KEY (jmap_account_id, email_id)
    )`,
+  // The C1 driver: rows still wanted, cheapest to find by the flag.
+  `CREATE INDEX IF NOT EXISTS body_queue_wanted ON body_queue(jmap_account_id, gave_up, received_at DESC)`,
 
   // Cursors, coverage, flags. Row-per-field so §9.1's patches are genuinely
   // field-level (I12) rather than a read-modify-write of one big blob.

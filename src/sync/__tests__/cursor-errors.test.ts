@@ -265,23 +265,45 @@ describe('§7.7 escalation is PER CURSOR — S6/F47', () => {
 
   it('one healthy cursor cannot mask another cursor wedging (F47)', () => {
     // The scenario: Mailbox drains cleanly every cycle, Email fails every cycle. A
-    // SHARED counter reset by "something succeeded" would never escalate and the
-    // Email cursor would never advance again — silently, forever. Because the
-    // counters live on SyncCursor, the Email cursor's ladder escalates on schedule.
-    let email = cursor({ type: 'Email' });
-    const mailbox = cursor({ type: 'Mailbox' });
+    // SHARED counter reset by "something succeeded" would never escalate, and the Email
+    // cursor would never advance again — silently, forever.
+    //
+    // The previous version of this test created a `mailbox` variable and never read it,
+    // so deleting it left the test unchanged: it asserted the Email ladder in isolation
+    // and said nothing about interference. Both cursors are now observed.
+    let email = cursor({ type: 'Email', consecutiveFailures: 0, maxChangesRung: 0 });
+    let mailbox = cursor({ type: 'Mailbox', consecutiveFailures: 3, maxChangesRung: 2 });
+    let escalatedAt: number | null = null;
 
-    for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i += 1) {
-      const decision = escalateOnFailure(email, 's10');
-      // The Mailbox cursor succeeding does not touch the Email cursor's state.
-      Object.assign(mailbox, resetOnAdvance());
-      email = { ...email, ...decision.patch };
-      if (decision.escalateToReconcile) {
-        expect(i).toBeLessThan(MAX_CONSECUTIVE_FAILURES);
-        return;
-      }
+    for (let i = 0; i < MAX_CONSECUTIVE_FAILURES + 2; i += 1) {
+      const emailDecision = escalateOnFailure(email, 's10');
+      email = { ...email, ...emailDecision.patch };
+
+      // The Mailbox cursor advances cleanly in the same cycle.
+      const mailboxBefore = { ...mailbox };
+      mailbox = { ...mailbox, ...resetOnAdvance() };
+
+      // Its reset is visible on ITSELF — and on the first pass it demonstrably cleared
+      // real accumulated failure state rather than being a no-op.
+      if (i === 0) expect(mailboxBefore.consecutiveFailures).toBe(3);
+      expect(mailbox.consecutiveFailures).toBe(0);
+      expect(mailbox.maxChangesRung).toBe(0);
+      // ...and it must NOT have reset the Email cursor. That is the actual S6 property:
+      // the Email counter keeps climbing while a sibling cursor succeeds every cycle.
+      expect(email.consecutiveFailures).toBe(i + 1);
+
+      if (emailDecision.escalateToReconcile && escalatedAt === null) escalatedAt = i;
     }
-    throw new Error('the Email cursor never escalated — S6 regression');
+
+    expect(escalatedAt, 'the Email cursor never escalated — S6 regression').not.toBeNull();
+    // On the 4th failure, not the 5th: the LADDER exhausts first (rungs 1, 2, 3 are
+    // taken by failures 1-3, so failure 4 is already AT rung 3, which is terminal).
+    // The consecutiveFailures >= 5 rule is the backstop for the case where the rung
+    // never advances, e.g. a server whose maxObjectsInGet collapses every rung.
+    expect(escalatedAt).toBe(3);
+    expect(email.consecutiveFailures).toBeGreaterThanOrEqual(4);
+    // And the healthy cursor is still healthy, never dragged into the escalation.
+    expect(mailbox.consecutiveFailures).toBe(0);
   });
 });
 
@@ -348,5 +370,29 @@ describe('§7.6.1 reconcile ceiling — S10/F39', () => {
     expect(budget.allowed).toBe(true);
     expect(budget.reconcilesInWindow).toBe(1);
     expect(budget.reconcileWindowStartedAt).toBe(T0 + RECONCILE_WINDOW_MS);
+  });
+});
+
+describe('L4: the minting boundary certifies the value, not just its provenance', () => {
+  it('rejects a non-string state token', async () => {
+    const { asChangesState, asSnapshotState } = await import('../states');
+    // A JMAP response body is parsed JSON, so `body.newState` can be a number, null or
+    // an object. The brand certifies where the value came from; without a shape check
+    // the cast launders anything into something the engine persists and compares as a
+    // cursor for the lifetime of the account.
+    for (const bad of [undefined, null, 42, {}, [], true, '']) {
+      expect(() => asChangesState(bad), `asChangesState(${JSON.stringify(bad)})`).toThrow(
+        TypeError,
+      );
+      expect(() => asSnapshotState(bad), `asSnapshotState(${JSON.stringify(bad)})`).toThrow(
+        TypeError,
+      );
+    }
+  });
+
+  it('accepts a real token', async () => {
+    const { asChangesState, asSnapshotState } = await import('../states');
+    expect(asChangesState('s42')).toBe('s42');
+    expect(asSnapshotState('s42')).toBe('s42');
   });
 });

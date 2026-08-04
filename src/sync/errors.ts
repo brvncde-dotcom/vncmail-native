@@ -97,7 +97,10 @@ const TRANSPORT_HINTS = [
  * api layer ever carries a structured type, only `extractJmapType` changes.
  */
 function extractJmapType(message: string): string | undefined {
-  const m = /(?:failed|error):\s*([A-Za-z][A-Za-z0-9_]*)/.exec(message);
+  // Anchored on the api layer's actual format — `Email/changes failed: <type>` — rather
+  // than any message containing "failed:". The loose version matched
+  // `fetch failed: ECONNRESET` and classified a socket reset as a JMAP method error.
+  const m = /^[A-Za-z]+\/[A-Za-z]+ (?:failed|error):\s*([A-Za-z][A-Za-z0-9_]*)/.exec(message);
   return m?.[1];
 }
 
@@ -150,11 +153,13 @@ export function classify(err: unknown): Classified {
   if (TRANSPORT_NAMES.has(err.name)) {
     return { class: 'Transport', retryable: true, message: err.message };
   }
-  const lower = (err.message ?? '').toLowerCase();
-  if (TRANSPORT_HINTS.some((h) => lower.includes(h))) {
-    return { class: 'Transport', retryable: true, message: err.message };
-  }
 
+  // L3: STRUCTURE BEFORE STRINGS. The transport hints are a substring match on the
+  // message, and a method-level error's `description` can legitimately contain
+  // "timeout", "socket" or "tls" — which used to misclassify it as Transport before the
+  // HTTP status or JMAP error type was even looked at. Both are retryable in practice,
+  // so this was not a live bug, but classification driven by prose that happens to
+  // mention a network is not a property worth keeping.
   const status = httpStatus(err.message);
   if (status !== undefined) {
     if (status === 429) return { class: 'RateLimit', retryable: true, message: err.message };
@@ -175,6 +180,12 @@ export function classify(err: unknown): Classified {
       retryable: cls === 'RateLimit' || cls === 'ServerTransient' || cls === 'RequestLimit',
       message: err.message,
     };
+  }
+
+  // Only now, with no status and no recognisable JMAP type, fall back to the prose.
+  const lower = (err.message ?? '').toLowerCase();
+  if (TRANSPORT_HINTS.some((h) => lower.includes(h))) {
+    return { class: 'Transport', retryable: true, message: err.message };
   }
 
   return { class: 'ServerTransient', retryable: true, message: err.message };

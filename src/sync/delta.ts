@@ -19,7 +19,14 @@ import {
 // them through. If that ever stops being true, the compiler says so here rather
 // than a cast hiding it.
 import { escalateOnFailure, type MaxChangesRung, resetOnAdvance, rungValue } from './cursor';
-import { classify, StateInvalidError } from './errors';
+import {
+  backoffDelayMs,
+  type BudgetMode,
+  classify,
+  type ErrorClass,
+  MAX_ATTEMPTS_PER_OP,
+  StateInvalidError,
+} from './errors';
 import type { JmapPort } from './jmap-port';
 import type { PendingIndex } from './overlay';
 import type { Email, Mailbox } from '../api/types';
@@ -35,6 +42,8 @@ export interface DrainResult {
   /** Set when `outcome === 'state-invalid'`, so the caller can reconcile. */
   invalidReason?: 'cannotCalculateChanges' | 'oldStateMismatch';
   error?: string;
+  /** From a 429's `Retry-After`: the earliest the caller should come back. */
+  retryAfterMs?: number;
 }
 
 export interface DrainContext {
@@ -59,6 +68,11 @@ export interface DrainContext {
   cachedAtStamp?: number;
   /** Abort at the next page boundary: background, logout, T10, network loss (§10.3). */
   shouldAbort(): boolean;
+  /** Budget mode, for §7.2's backoff cap. */
+  mode?: BudgetMode;
+  /** Injected so tests do not wait out real backoff. Defaults to a real timer. */
+  sleep?(ms: number): Promise<void>;
+  random?(): number;
   log?: (level: 'warn' | 'error' | 'info', message: string) => void;
 }
 
@@ -301,7 +315,7 @@ async function drain(
     const sinceState = cursor.state;
     let response: { page: ChangesPage; updatedProperties?: string[] | null } | null;
     try {
-      response = await spec.request(sinceState, cursor.maxChangesRung);
+      response = await requestWithRetry(ctx, () => spec.request(sinceState, cursor.maxChangesRung));
     } catch (err) {
       return handleFailure(ctx, key, cursor, sinceState, err, pagesApplied, madeProgress);
     }
@@ -383,6 +397,53 @@ async function drain(
   }
 }
 
+/**
+ * §7.2 in force, rather than as a documented constant nobody consumed.
+ *
+ * Previously `MAX_ATTEMPTS_PER_OP` and `backoffDelayMs` were unused on this path and a
+ * `Retry-After` was parsed and discarded, so a single transient blip on
+ * `Email/changes` ended the drain immediately with no delay — and, after five such
+ * cycles, escalated to a full window re-enumeration.
+ */
+async function requestWithRetry<T>(ctx: DrainContext, attempt: () => Promise<T>): Promise<T> {
+  const sleep = ctx.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let lastError: unknown;
+  for (let n = 0; n < MAX_ATTEMPTS_PER_OP; n += 1) {
+    try {
+      return await attempt();
+    } catch (err) {
+      lastError = err;
+      const classified = classify(err);
+      if (!classified.retryable) throw err;
+      if (n === MAX_ATTEMPTS_PER_OP - 1) break;
+      if (ctx.shouldAbort()) throw err;
+      // A Retry-After always wins over a smaller computed delay: answering a
+      // rate-limited server sooner than it asked is exactly the wrong move.
+      const delay = backoffDelayMs(n, {
+        mode: ctx.mode ?? 'foreground',
+        retryAfterMs: classified.retryAfterMs,
+        random: ctx.random,
+      });
+      log(ctx, 'warn', `retrying after ${delay}ms (${classified.class}): ${classified.message}`);
+      await sleep(delay);
+      if (ctx.now() >= ctx.deadlineAt) throw err;
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * Only a size/availability problem is worth escalating to a rebuild.
+ *
+ * Escalating on RateLimit meant the response to a rate-limited server was to issue far
+ * MORE requests — a full window re-enumeration. Escalating on Auth would let a 401
+ * trigger a rebuild, and on Transport would let a tunnel-shaped network do the same.
+ * Fatal is our own bug and a rebuild will not fix it; it is logged loudly instead.
+ */
+function escalationApplies(cls: ErrorClass): boolean {
+  return cls === 'ServerTransient' || cls === 'RequestLimit';
+}
+
 async function patchDrainPending(
   ctx: DrainContext,
   key: CursorKey,
@@ -427,6 +488,22 @@ async function handleFailure(
 
   // §7.1: everywhere except StateInvalid, FAILURE MEANS THE CURSOR STANDS STILL.
   // That is what makes "a failure never causes silent data loss" structural.
+  if (!escalationApplies(classified.class)) {
+    log(
+      ctx,
+      classified.class === 'Fatal' ? 'error' : 'warn',
+      `${key.type}/${key.jmapAccountId} drain failed (${classified.class}, not escalatable): ` +
+        classified.message,
+    );
+    return {
+      outcome: 'failed',
+      pagesApplied,
+      madeProgress,
+      error: classified.message,
+      retryAfterMs: classified.retryAfterMs,
+    };
+  }
+
   const decision = escalateOnFailure(cursor, failedState);
   try {
     await ctx.store.transaction((txn) => txn.patchCursor(key, decision.patch));

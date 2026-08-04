@@ -64,6 +64,16 @@ export class FakeJmapServer {
   /** When true, `oldState` is echoed with a cosmetic suffix (F39). */
   echoCosmeticOldState = false;
 
+  /**
+   * One-shot cosmetic `oldState` mismatch: the FIRST call mismatches, the re-issue
+   * matches. This is the shape §7.6.1's confirm-before-escalate branch exists for —
+   * a transient server anomaly rather than a real invalidation.
+   */
+  oldStateMismatchOnce = false;
+
+  /** Sticky faults: throw on EVERY call while set (the one-shot `faults` map fires once). */
+  stickyFaults: Partial<Record<'getBodies' | 'getEnvelopes' | 'emailChanges', (() => Error) | null>> = {};
+
   /** When set, the account the client "serves" differs — the D6 hazard. */
   servedAccountId: string | null = null;
 
@@ -248,11 +258,22 @@ export class FakeJmapServer {
   }
 
   private throwIfFaulty(name: keyof FakeJmapServer['faults']): void {
+    const sticky = (this.stickyFaults as Record<string, (() => Error) | null | undefined>)[name];
+    if (sticky) throw sticky();
     const fault = this.faults[name];
     if (fault) {
       this.faults[name] = null;
       throw fault();
     }
+  }
+
+  /** Consumes the one-shot mismatch, so the re-issue sees a clean echo. */
+  private echoOldState(sinceState: string): string {
+    if (this.oldStateMismatchOnce) {
+      this.oldStateMismatchOnce = false;
+      return `${sinceState} `;
+    }
+    return this.echoCosmeticOldState ? `${sinceState} ` : sinceState;
   }
 
   private project(email: Email, properties: string[]): Email {
@@ -277,9 +298,7 @@ export class FakeJmapServer {
         if (since === null || since < server.changeLogFloor) return null;
         const res = server.changesFor(server.mailboxes, since, server.maxObjectsInGetValue);
         return {
-          oldState: asChangesState(
-            server.echoCosmeticOldState ? `${sinceState} ` : sinceState,
-          ),
+          oldState: asChangesState(server.echoOldState(sinceState)),
           newState: asChangesState(stateToken(res.newState)),
           hasMoreChanges: res.hasMore,
           created: res.created,
@@ -297,9 +316,7 @@ export class FakeJmapServer {
         if (since === null || since < server.changeLogFloor) return null;
         const res = server.changesFor(server.emails, since, maxChanges);
         return {
-          oldState: asChangesState(
-            server.echoCosmeticOldState ? `${sinceState} ` : sinceState,
-          ),
+          oldState: asChangesState(server.echoOldState(sinceState)),
           newState: asChangesState(stateToken(res.newState)),
           hasMoreChanges: res.hasMore,
           created: res.created,

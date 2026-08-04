@@ -256,9 +256,9 @@ export const useOutboxStore = create<OutboxState>((set, get) => ({
   clear: async () => {
     const accountId = get().activeAccountId;
     set({ entries: [] });
-    if (accountId) {
-      await AsyncStorage.removeItem(storageKey(accountId)).catch(() => undefined);
-    }
+    // Propagates rather than swallowing: this empties the only durable record of local
+    // intent, so a failure here leaves disk and memory disagreeing about what is queued.
+    if (accountId) await AsyncStorage.removeItem(storageKey(accountId));
   },
 }));
 

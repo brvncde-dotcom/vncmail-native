@@ -31,14 +31,30 @@ export type SnapshotState = string & { readonly __brand: 'SnapshotState' };
 // assertion (§6.3, §13). Per §12.1 the ONLY legitimate callers are the response
 // parsers in `src/api/email.ts`; calling them anywhere else re-opens D4 by hand.
 
-/** For `src/api/email.ts` response parsers only. */
-export function asChangesState(newState: string): ChangesState {
-  return newState as ChangesState;
+/**
+ * L4: the brand certifies PROVENANCE, but a JMAP response body is parsed JSON, so the
+ * value could be a number, null or an object and the cast would happily launder it into
+ * something the rest of the engine treats as a cursor. Check the shape too — a
+ * malformed state token must fail loudly at the boundary rather than being persisted
+ * and compared for the lifetime of the account.
+ */
+function certifyStateToken(value: unknown, kind: string): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new TypeError(
+      `${kind}: expected a non-empty string state token, got ${value === null ? 'null' : typeof value}`,
+    );
+  }
+  return value;
 }
 
 /** For `src/api/email.ts` response parsers only. */
-export function asSnapshotState(state: string): SnapshotState {
-  return state as SnapshotState;
+export function asChangesState(newState: unknown): ChangesState {
+  return certifyStateToken(newState, 'ChangesState') as ChangesState;
+}
+
+/** For `src/api/email.ts` response parsers only. */
+export function asSnapshotState(state: unknown): SnapshotState {
+  return certifyStateToken(state, 'SnapshotState') as SnapshotState;
 }
 
 // ── EnumerationCommitment ──

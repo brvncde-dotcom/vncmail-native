@@ -165,6 +165,14 @@ export interface BodyQueueEntry {
   attempts: number;
   lastError?: string;
   nextAttemptAt?: number;
+  /**
+   * Durable terminal state. A gave-up row is KEPT rather than deleted, precisely so
+   * job C2 cannot resurrect it: C2's driver is "envelope without a body", which by
+   * itself cannot distinguish "not fetched yet" from "deliberately not kept".
+   * Cleared wholesale by a completed reconcile, so a transient outage self-heals.
+   */
+  gaveUp?: boolean;
+  gaveUpReason?: 'attempts' | 'notFound';
 }
 
 export interface LastCycle {
@@ -295,11 +303,29 @@ export interface SyncTxn {
   deleteBodies(keys: RowKey[]): Promise<void>;
 
   // ── body queue (S12) ──
-  /** Insert-or-ignore. NEVER resets `attempts` on an existing row (F41). */
-  enqueueBodies(entries: BodyQueueEntry[]): Promise<void>;
+  /**
+   * Insert-or-ignore. NEVER resets `attempts` on an existing row (F41), and never
+   * revives a `gaveUp` row.
+   *
+   * Returns the number of rows ACTUALLY INSERTED. The count matters: the caller
+   * reports it as progress, and reporting attempted-rather-than-inserted made the
+   * engine believe there was unfinished work on every cycle for as long as any
+   * envelope lacked a body — an endless 5-second chain.
+   */
+  enqueueBodies(entries: BodyQueueEntry[]): Promise<number>;
   /** Attempts/error/nextAttemptAt only. */
   updateBodyQueue(entries: BodyQueueEntry[]): Promise<void>;
   dequeueBodies(keys: RowKey[]): Promise<void>;
+  /** Records a durable terminal state instead of deleting the row. */
+  markBodyGaveUp(
+    entries: Array<{ key: RowKey; reason: 'attempts' | 'notFound'; lastError?: string }>,
+  ): Promise<void>;
+  /**
+   * Clears every give-up for this account — §7.6 step 5. A reconcile re-verifies the
+   * record set from scratch, so a give-up recorded during an outage must not outlive
+   * it or a transient failure would permanently deny a body.
+   */
+  clearBodyGiveUps(jmapAccountId: JmapAccountId): Promise<void>;
 
   // ── state: FIELD-LEVEL PATCHES ONLY (S1, I12). No whole-struct write exists. ──
   /**
@@ -387,7 +413,10 @@ export interface SyncStore {
   ): Promise<Array<{ key: RowKey; receivedAt: string; bytes: number }>>;
   /** Bodies with no surviving envelope — the orphan sweep (F45). */
   listOrphanBodies(limit: number): Promise<RowKey[]>;
+  /** Wanted rows only — never a `gaveUp` one. */
   takeBodyQueue(limit: number, now: number): Promise<BodyQueueEntry[]>;
+  /** Keys with a durable terminal state, so C2 can exclude them from its driver. */
+  listBodyGiveUps(jmapAccountId: JmapAccountId, limit: number): Promise<RowKey[]>;
 
   /**
    * Records + body queue (S12), NOT cursors. Sets `resyncRequired` and bumps the

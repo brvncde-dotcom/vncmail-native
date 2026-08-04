@@ -165,15 +165,33 @@ describe('F44 clock-jump guard', () => {
     expect(g.warning).toMatch(/holding the previous floor/);
   });
 
-  it('records the COMPUTED value so the guard cannot become permanent', () => {
+  it('persists the PREVIOUS floor, so a chained cycle cannot launder the jump (H2)', () => {
     const first = guardFloorAgainstClockJump('2027-07-01T00:00:00Z', '2026-07-01T00:00:00Z');
     expect(first.suppressed).toBe(true);
-    // Next cycle sees the same computed value as lastWindowFloor -> confirmed.
-    const second = guardFloorAgainstClockJump('2027-07-01T00:00:00Z', first.nextLastWindowFloor, {
-      alreadyConfirmed: true,
+    expect(first.evictionAllowed).toBe(false);
+    // The H2 bug: persisting the COMPUTED value made the next cycle (~5 s later) see a
+    // 5-second delta, adopt it as legitimate, call it a retention narrow, and evict
+    // everything. Persisting the previous value keeps the suppression stable.
+    expect(first.nextLastWindowFloor).toBe('2026-07-01T00:00:00Z');
+
+    const chained = guardFloorAgainstClockJump(
+      '2027-07-01T00:00:05Z',
+      first.nextLastWindowFloor,
+    );
+    expect(chained.suppressed).toBe(true);
+    expect(chained.evictionAllowed).toBe(false);
+    expect(chained.envelopeFrom).toBe('2026-07-01T00:00:00Z');
+  });
+
+  it('an explicit retention-setting change is adopted immediately, with eviction', () => {
+    // Intent, not a glitch. This is the case that used to be conflated with the clock
+    // anomaly, which is why second-observation adoption existed at all.
+    const g = guardFloorAgainstClockJump('2027-07-01T00:00:00Z', '2026-07-01T00:00:00Z', {
+      policyChanged: true,
     });
-    expect(second.suppressed).toBe(false);
-    expect(second.envelopeFrom).toBe('2027-07-01T00:00:00Z');
+    expect(g.suppressed).toBe(false);
+    expect(g.evictionAllowed).toBe(true);
+    expect(g.envelopeFrom).toBe('2027-07-01T00:00:00Z');
   });
 
   it('trips exactly at the documented threshold', () => {
@@ -181,7 +199,9 @@ describe('F44 clock-jump guard', () => {
     const under = new Date(base + CLOCK_JUMP_GUARD_MS).toISOString();
     const over = new Date(base + CLOCK_JUMP_GUARD_MS + 1).toISOString();
     expect(guardFloorAgainstClockJump(under, '2026-07-01T00:00:00.000Z').suppressed).toBe(false);
+    expect(guardFloorAgainstClockJump(under, '2026-07-01T00:00:00.000Z').evictionAllowed).toBe(true);
     expect(guardFloorAgainstClockJump(over, '2026-07-01T00:00:00.000Z').suppressed).toBe(true);
+    expect(guardFloorAgainstClockJump(over, '2026-07-01T00:00:00.000Z').evictionAllowed).toBe(false);
   });
 });
 

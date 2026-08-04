@@ -226,8 +226,17 @@ export function adjustForWindow(
   }
 
   // F23B: narrowed. Evict below the new floor; coveredFrom follows it.
+  //
+  // L1: only when there WAS a completed coverage to narrow. With `coveredFrom === null`
+  // the initial scan never finished, so setting it here would claim a range is complete
+  // that was never walked — and delta sync cannot re-deliver pre-existing mail to
+  // repair that.
   return {
-    patch: { targetFrom: envelopeFrom, sweepFloor: envelopeFrom, coveredFrom: envelopeFrom },
+    patch: {
+      targetFrom: envelopeFrom,
+      sweepFloor: envelopeFrom,
+      ...(coverage.coveredFrom !== null ? { coveredFrom: envelopeFrom } : {}),
+    },
     evictBelow: envelopeFrom,
     note: `envelope window narrowed to ${envelopeFrom}; evicting below it (F23B)`,
   };
@@ -393,7 +402,7 @@ export async function runScan(
 
     // §6.1's no-forward-progress guard: a FULL page whose every row shares one
     // millisecond. In order.
-    const recovered = await recoverFromTieCluster(ctx, scanCursor, page.ids);
+    const recovered = await recoverFromTieCluster(ctx, scanCursor, page.ids, stampedAt);
     if (recovered.kind === 'anchored') {
       scanCursor = recovered.scanCursor;
       continue;
@@ -450,6 +459,7 @@ async function recoverFromTieCluster(
   ctx: CoverageContext,
   scanCursor: string,
   previousIds: string[],
+  stampedAt: number,
 ): Promise<TieRecovery> {
   const anchor = previousIds[previousIds.length - 1];
   if (!anchor) return { kind: 'anchor-rejected' };
@@ -457,7 +467,12 @@ async function recoverFromTieCluster(
     const anchored = await fetchScanPage(ctx, scanCursor, anchor);
     if (anchored.ids.length === 0) return { kind: 'anchor-rejected' };
     const fetched = await ctx.port.getEnvelopes(anchored.ids, ctx.jmapAccountId);
-    const rows = fetched.list.map((e) => toEnvelopeRow(e, ctx.jmapAccountId, ctx.now()));
+    // The PINNED stamp, not `ctx.now()`. The pin is max(now, maxCachedAt + 1), so it
+    // routinely EXCEEDS now — stamping with now here would leave these rows at
+    // cached_at < pin and the sweep would delete envelopes this very function just
+    // re-verified against the server. Permanent, and unrecoverable once coveredFrom
+    // claims the range complete, since /changes cannot re-deliver pre-existing mail.
+    const rows = fetched.list.map((e) => toEnvelopeRow(e, ctx.jmapAccountId, stampedAt));
     const max = rows.reduce<string | null>(
       (acc, r) => (acc === null || r.receivedAt > acc ? r.receivedAt : acc),
       null,
@@ -661,6 +676,10 @@ export async function finishReconcile(
     for (const type of CURSOR_TYPES) {
       await txn.patchCursor({ jmapAccountId: ctx.jmapAccountId, type }, resetAfterReconcile());
     }
+    // A reconcile re-verifies the record set from scratch, so a body give-up recorded
+    // during whatever went wrong must not outlive it — otherwise a transient outage
+    // would permanently deny a body with no path back.
+    await txn.clearBodyGiveUps(ctx.jmapAccountId);
   });
 
   if (deferred) {

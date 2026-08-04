@@ -54,6 +54,11 @@ export interface GuardedFloor {
   envelopeFrom: string;
   /** True when the guard suppressed a suspicious jump. */
   suppressed: boolean;
+  /**
+   * False while the floor we are using came from a SUSPECT clock reading. Eviction and
+   * the reconcile sweep must both refuse to act on it.
+   */
+  evictionAllowed: boolean;
   /** What to persist as `lastWindowFloor` (§3.1). */
   nextLastWindowFloor: string;
   warning?: string;
@@ -76,29 +81,54 @@ export interface GuardedFloor {
 export function guardFloorAgainstClockJump(
   computed: string,
   lastWindowFloor: string | undefined,
-  opts: { alreadyConfirmed?: boolean } = {},
+  opts: { policyChanged?: boolean } = {},
 ): GuardedFloor {
-  if (!lastWindowFloor) {
-    return { envelopeFrom: computed, suppressed: false, nextLastWindowFloor: computed };
-  }
+  const adopt = (floor: string): GuardedFloor => ({
+    envelopeFrom: floor,
+    suppressed: false,
+    evictionAllowed: true,
+    nextLastWindowFloor: floor,
+  });
+
+  if (!lastWindowFloor) return adopt(computed);
+
+  // An explicit `envelopeDays` change is INTENT, not a glitch, and must take effect —
+  // including its eviction. This is also why the previous "adopt on the second
+  // observation" rule had to go: with intent handled here, second-observation adoption
+  // existed ONLY for the clock-anomaly case, i.e. only for the case where adopting is
+  // the harmful thing to do.
+  if (opts.policyChanged) return adopt(computed);
+
   const delta = Math.abs(Date.parse(computed) - Date.parse(lastWindowFloor));
-  if (!Number.isFinite(delta) || delta <= CLOCK_JUMP_GUARD_MS) {
-    return { envelopeFrom: computed, suppressed: false, nextLastWindowFloor: computed };
-  }
-  if (opts.alreadyConfirmed) {
-    // Second consistent observation — the clock really did move (or the user
-    // really did change the setting). Adopt it.
-    return { envelopeFrom: computed, suppressed: false, nextLastWindowFloor: computed };
-  }
+  if (!Number.isFinite(delta) || delta <= CLOCK_JUMP_GUARD_MS) return adopt(computed);
+
+  // SUSPECT. Ignore the reading entirely and keep the previous floor.
+  //
+  // Persisting the COMPUTED value here was the H2 bug: the next chained cycle (T9, ~5 s
+  // later) computed a floor within 5 s of the persisted one, which is inside this
+  // threshold, so it was adopted as legitimate, classified as a retention NARROW, and
+  // every envelope below it was evicted. A clock glitch wiped the entire offline store
+  // about five seconds after being detected — through the very mechanism meant to
+  // prevent that.
+  //
+  // Persisting the PREVIOUS value instead means every subsequent cycle re-detects the
+  // same jump and stays suppressed. The trade-off, stated plainly: on a device whose
+  // clock is permanently wrong by more than a day, retention stops tracking the clock
+  // and the store keeps more mail than the setting says. That is bounded — envelopes
+  // are ~1 KB and bodies are capped in bytes — and it self-clears the moment the user
+  // changes a retention setting (`policyChanged`) or the clock returns. Keeping too
+  // much mail is the correct direction to fail for a feature whose entire purpose is
+  // having mail available offline.
   return {
     envelopeFrom: lastWindowFloor,
     suppressed: true,
-    // Record the COMPUTED value so the next cycle can recognise a repeat and
-    // adopt it; recording the old value would make the guard permanent.
-    nextLastWindowFloor: computed,
+    evictionAllowed: false,
+    nextLastWindowFloor: lastWindowFloor,
     warning:
       `retention floor moved ${Math.round(delta / 3_600_000)}h ` +
-      `(${lastWindowFloor} -> ${computed}); holding the previous floor for one cycle (F44)`,
+      `(${lastWindowFloor} -> ${computed}) with no retention-setting change; ` +
+      'treating it as a device-clock anomaly, holding the previous floor and ' +
+      'suppressing eviction (F44)',
   };
 }
 

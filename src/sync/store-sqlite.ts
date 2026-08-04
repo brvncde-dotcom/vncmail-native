@@ -411,12 +411,14 @@ class SqliteTxn implements SyncTxn {
    * re-enqueuing a permanently failing body would defeat the give-up-after-5
    * rule and retry it forever.
    */
-  async enqueueBodies(entries: BodyQueueEntry[]): Promise<void> {
+  async enqueueBodies(entries: BodyQueueEntry[]): Promise<number> {
+    let inserted = 0;
     for (const e of entries) {
-      await this.db.runAsync(
+      const res = await this.db.runAsync(
         `INSERT OR IGNORE INTO body_queue
-           (jmap_account_id, email_id, received_at, attempts, next_attempt_at, last_error)
-         VALUES (?,?,?,?,?,?)`,
+           (jmap_account_id, email_id, received_at, attempts, next_attempt_at, last_error,
+            gave_up, gave_up_reason)
+         VALUES (?,?,?,?,?,?,?,?)`,
         [
           e.jmapAccountId,
           e.emailId,
@@ -424,9 +426,42 @@ class SqliteTxn implements SyncTxn {
           e.attempts,
           e.nextAttemptAt ?? null,
           e.lastError ?? null,
+          e.gaveUp ? 1 : 0,
+          e.gaveUpReason ?? null,
         ],
       );
+      inserted += res.changes;
     }
+    return inserted;
+  }
+
+  async markBodyGaveUp(
+    entries: Array<{ key: RowKey; reason: 'attempts' | 'notFound'; lastError?: string }>,
+  ): Promise<void> {
+    for (const { key, reason, lastError } of entries) {
+      // Upsert, because a notFound can arrive for a row that was never retried.
+      await this.db.runAsync(
+        `INSERT INTO body_queue
+           (jmap_account_id, email_id, received_at, attempts, next_attempt_at, last_error,
+            gave_up, gave_up_reason)
+         VALUES (?, ?, COALESCE((SELECT received_at FROM body_queue
+                                  WHERE jmap_account_id = ? AND email_id = ?), ''),
+                 0, NULL, ?, 1, ?)
+         ON CONFLICT(jmap_account_id, email_id) DO UPDATE SET
+           gave_up = 1, gave_up_reason = excluded.gave_up_reason,
+           last_error = excluded.last_error, next_attempt_at = NULL`,
+        [key.jmapAccountId, key.id, key.jmapAccountId, key.id, lastError ?? null, reason],
+      );
+    }
+  }
+
+  async clearBodyGiveUps(jmapAccountId: JmapAccountId): Promise<void> {
+    // Delete rather than un-flag: a cleared give-up should look like "never queued",
+    // so C2's next pass re-enqueues it with a clean attempt count.
+    await this.db.runAsync(
+      'DELETE FROM body_queue WHERE jmap_account_id = ? AND gave_up = 1',
+      [jmapAccountId],
+    );
   }
 
   async updateBodyQueue(entries: BodyQueueEntry[]): Promise<void> {
@@ -564,6 +599,8 @@ interface StoredFlags {
   reconcilesInWindow: number;
   reconcileWindowStartedAt: number;
   lastWindowFloor?: string;
+  /** L2: declared explicitly so a stricter backend cannot silently drop it. */
+  lastEnvelopeDays?: number;
   lastCycle?: LastCycle;
 }
 
@@ -934,9 +971,11 @@ class SqliteStore implements SyncStore {
       attempts: number;
       next_attempt_at: number | null;
       last_error: string | null;
+      gave_up: number;
+      gave_up_reason: string | null;
     }>(
       `SELECT * FROM body_queue
-       WHERE next_attempt_at IS NULL OR next_attempt_at <= ?
+       WHERE gave_up = 0 AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
        ORDER BY received_at DESC, email_id ASC LIMIT ?`,
       [now, limit],
     );
@@ -948,6 +987,16 @@ class SqliteStore implements SyncStore {
       nextAttemptAt: r.next_attempt_at ?? undefined,
       lastError: r.last_error ?? undefined,
     }));
+  }
+
+  async listBodyGiveUps(jmapAccountId: JmapAccountId, limit: number): Promise<RowKey[]> {
+    const db = await this.dbForRead();
+    if (!db) return [];
+    const rows = await db.getAllAsync<{ email_id: string }>(
+      'SELECT email_id FROM body_queue WHERE jmap_account_id = ? AND gave_up = 1 LIMIT ?',
+      [jmapAccountId, limit],
+    );
+    return rows.map((r) => ({ jmapAccountId, id: r.email_id }));
   }
 
   /**

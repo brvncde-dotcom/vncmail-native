@@ -83,6 +83,11 @@ export interface CycleReport {
   finishedAt: number;
   phases: string[];
   error?: string;
+  /**
+   * From a 429's `Retry-After`. The trigger layer must not come back sooner — parsing
+   * it and then discarding it was M2's other half.
+   */
+  retryAfterMs?: number;
 }
 
 export interface EngineDeps {
@@ -100,6 +105,8 @@ export interface EngineDeps {
   pendingOpsFor(accountId: LocalAccountId): readonly PendingOp[];
   now?(): number;
   random?(): number;
+  /** Injected so tests do not wait out real backoff (§7.2). */
+  sleep?(ms: number): Promise<void>;
   log?(level: 'warn' | 'error' | 'info', message: string): void;
   onReport?(report: CycleReport): void;
 }
@@ -171,13 +178,34 @@ export class SyncEngine {
       return running.promise;
     }
 
+    // The promise is assigned BEFORE `executeCycle` runs, via a deferred wrapper.
+    //
+    // M3: several early-return paths inside `executeCycle` (offline, no session,
+    // disabled, no JMAP account) complete synchronously and call `onReport`
+    // synchronously. A re-entrant `runCycle` from that callback used to observe
+    // `entry.promise === undefined`, skip coalescing, and overwrite the map entry —
+    // after which the original cycle's `.finally` deleted the WRONG entry and left the
+    // newer cycle untracked.
     const entry: InFlight = { abort: false };
     this.inFlight.set(accountId, entry);
-    const promise = this.executeCycle(accountId, reason, mode, entry).finally(() => {
-      this.inFlight.delete(accountId);
+    let settle: (report: CycleReport) => void = () => undefined;
+    let fail: (err: unknown) => void = () => undefined;
+    const inner = new Promise<CycleReport>((resolve, reject) => {
+      settle = resolve;
+      fail = reject;
     });
-    entry.promise = promise;
-    return promise;
+    // The promise handed to callers INCLUDES the cleanup, so awaiting a cycle
+    // guarantees the map entry is gone; and it is stored on `entry` before
+    // `executeCycle` is invoked, so a re-entrant call from a synchronous `onReport`
+    // coalesces onto it instead of overwriting the map.
+    const wrapped = inner.finally(() => {
+      // Identity-checked: only clear the map if it still holds THIS entry.
+      if (this.inFlight.get(accountId) === entry) this.inFlight.delete(accountId);
+    });
+    entry.promise = wrapped;
+
+    void this.executeCycle(accountId, reason, mode, entry).then(settle, fail);
+    return wrapped;
   }
 
   private async executeCycle(
@@ -190,6 +218,7 @@ export class SyncEngine {
     const budget = BUDGETS[mode];
     const deadlineAt = startedAt + budget.wallClockMs;
     const phases: string[] = [];
+    let retryAfterMs: number | undefined;
 
     const finish = (
       outcome: CycleOutcome,
@@ -207,6 +236,7 @@ export class SyncEngine {
         finishedAt: this.now(),
         phases,
         error,
+        retryAfterMs,
       };
       this.deps.onReport?.(report);
       return report;
@@ -270,16 +300,9 @@ export class SyncEngine {
     // Settings change appear not to take effect.
     const policyChanged =
       state.lastEnvelopeDays !== undefined && state.lastEnvelopeDays !== policy.envelopeDays;
-    const guarded = policyChanged
-      ? {
-          envelopeFrom: rawFloors.envelopeFrom,
-          suppressed: false,
-          nextLastWindowFloor: rawFloors.envelopeFrom,
-          warning: undefined,
-        }
-      : guardFloorAgainstClockJump(rawFloors.envelopeFrom, state.lastWindowFloor, {
-          alreadyConfirmed: state.lastWindowFloor === rawFloors.envelopeFrom,
-        });
+    const guarded = guardFloorAgainstClockJump(rawFloors.envelopeFrom, state.lastWindowFloor, {
+      policyChanged,
+    });
     if (guarded.suppressed && guarded.warning) this.log('warn', guarded.warning);
     const envelopeFrom = guarded.envelopeFrom;
     // The body floor can never be older than the (possibly held) envelope floor.
@@ -381,15 +404,25 @@ export class SyncEngine {
       // While a reconcile is in progress, everything this cycle writes must be
       // stamped at or above the reconcile's pin, or the sweep would delete records the
       // live delta path just created (S9 makes delta run alongside the enumeration).
-      const reconcileStamp = coverage?.reconcileStampedAt;
-      const cachedAtStamp =
-        reconcileStamp !== undefined ? Math.max(this.now(), reconcileStamp) : undefined;
+      //
+      // M1: recomputed from the CURRENT coverage row on every drain iteration, not once
+      // before the loop — a reconcile can begin part-way through this very cycle (the
+      // Mailbox drain invalidating is exactly how), and a stamp captured before that
+      // would leave the Email drain's writes below the pin and eligible for the sweep.
+      const stampFor = (c: CoverageState | undefined): number | undefined =>
+        c?.reconcileStampedAt !== undefined
+          ? Math.max(this.now(), c.reconcileStampedAt)
+          : undefined;
+      let cachedAtStamp = stampFor(coverage);
 
       const drainCtxBase: Omit<DrainContext, 'pageBudget'> = {
         ...commonCtx,
         bodyFrom,
         pending,
         cachedAtStamp,
+        mode,
+        random: this.deps.random,
+        sleep: this.deps.sleep,
       };
 
       for (const type of ['Mailbox', 'Email'] as CursorType[]) {
@@ -404,16 +437,16 @@ export class SyncEngine {
         if (!cursor) continue;
 
         phases.push(`delta:${type}`);
+        cachedAtStamp = stampFor(coverage);
+        const drainCtx = { ...drainCtxBase, cachedAtStamp, pageBudget: budget.pagesPerCursor };
         const drain =
           type === 'Mailbox'
-            ? await drainMailboxChanges(
-                { ...drainCtxBase, pageBudget: budget.pagesPerCursor },
-                cursor,
-              )
-            : await drainEmailChanges(
-                { ...drainCtxBase, pageBudget: budget.pagesPerCursor },
-                cursor,
-              );
+            ? await drainMailboxChanges(drainCtx, cursor)
+            : await drainEmailChanges(drainCtx, cursor);
+
+        if (drain.retryAfterMs !== undefined) {
+          retryAfterMs = Math.max(retryAfterMs ?? 0, drain.retryAfterMs);
+        }
 
         const handled = await this.handleDrainResult(
           store,
@@ -473,7 +506,18 @@ export class SyncEngine {
               (c) => c.jmapAccountId === jmapAccountId,
             );
             if (fresh) {
-              if (fresh.phase === 'reconciling') {
+              if (fresh.phase === 'reconciling' && !guarded.evictionAllowed) {
+                // The sweep is a delete against the retention floor, so it is subject
+                // to the same rule as eviction: a suspect clock reading may not drive
+                // deletion. Leave the reconcile open; it completes on a cycle whose
+                // floor is trustworthy.
+                this.log(
+                  'warn',
+                  'deferring the reconcile sweep: the retention floor came from a ' +
+                    'suppressed clock anomaly (F44/H2)',
+                );
+                unfinishedWork = true;
+              } else if (fresh.phase === 'reconciling') {
                 // §7.6 step 4 — GATED on step 3 completing, and only against the
                 // PINNED sweepFloor (S2). This is the branch that made F38 a
                 // permanent-data-loss bug before revision 2.
@@ -496,9 +540,18 @@ export class SyncEngine {
         }
 
         if (adjustment.evictBelow) {
-          phases.push('retention:narrow');
-          await this.evictEnvelopesBelow(store, jmapAccountId, adjustment.evictBelow);
-          madeProgress = true;
+          if (!guarded.evictionAllowed) {
+            // H2: never delete on the strength of a suspect clock reading.
+            this.log(
+              'warn',
+              `skipping retention eviction below ${adjustment.evictBelow}: the floor came ` +
+                'from a suppressed clock anomaly, not from a retention-setting change (F44)',
+            );
+          } else {
+            phases.push('retention:narrow');
+            await this.evictEnvelopesBelow(store, jmapAccountId, adjustment.evictBelow);
+            madeProgress = true;
+          }
         }
       }
 
@@ -537,10 +590,10 @@ export class SyncEngine {
       const finalState = await store.loadAccountState();
       unfinishedWork =
         unfinishedWork ||
-        // A suppressed floor change is pending adoption on the next observation, so
-        // the cycle is NOT done — otherwise the change sits unapplied until some
-        // unrelated trigger happens along. This is exactly what T9 exists for (S8).
-        guarded.suppressed ||
+        // NOTE: a suppressed floor deliberately does NOT mark the cycle unfinished any
+        // more. The suppression is now STABLE rather than a one-cycle delay, so
+        // chaining on it would be an endless 5-second loop that changes nothing. The
+        // warning is the signal; a real trigger or a setting change is what resolves it.
         finalState.resyncRequired ||
         finalState.cursors.some((c) => c.drainPending) ||
         finalState.coverage.some(

@@ -22,6 +22,9 @@ export interface BodiesResult {
   fetched: number;
   failed: number;
   dequeued: number;
+  /** Rows that reached a durable terminal state this pass. */
+  gaveUp: number;
+  /** Rows ACTUALLY inserted — not entries attempted. */
   enqueued: number;
   evictedBodies: number;
   madeProgress: boolean;
@@ -52,6 +55,7 @@ function emptyResult(): BodiesResult {
     fetched: 0,
     failed: 0,
     dequeued: 0,
+    gaveUp: 0,
     enqueued: 0,
     evictedBodies: 0,
     madeProgress: false,
@@ -129,14 +133,19 @@ export async function drainBodyQueue(ctx: BodiesContext): Promise<BodiesResult> 
 
   const writes: Array<{ key: RowKey; body: BodyRow }> = [];
   const dequeue: RowKey[] = [];
+  const giveUp: Array<{ key: RowKey; reason: 'attempts' | 'notFound'; lastError?: string }> = [];
   const retry: BodyQueueEntry[] = [];
 
   for (const entry of actionable) {
     const key: RowKey = { jmapAccountId: entry.jmapAccountId, id: entry.emailId };
     if (notFoundSet.has(entry.emailId)) {
-      // F40 / S12: DEQUEUE IMMEDIATELY. The message is gone; the entry can never
-      // succeed and would otherwise burn five attempts and leave a row behind.
-      dequeue.push(key);
+      // F40 / S12: stop immediately — the message is gone, so the entry can never
+      // succeed and must not burn five attempts.
+      //
+      // Recorded as a DURABLE give-up rather than a delete. Deleting the row let job
+      // C2 re-insert it on the very next cycle (its driver only knows "envelope
+      // without a body"), producing one wasted fetch per cycle forever.
+      giveUp.push({ key, reason: 'notFound' });
       continue;
     }
     const email = byId.get(entry.emailId);
@@ -173,6 +182,7 @@ export async function drainBodyQueue(ctx: BodiesContext): Promise<BodiesResult> 
         if (!wrote) await txn.dequeueBodies([key]);
       }
       if (dequeue.length) await txn.dequeueBodies(dequeue);
+      if (giveUp.length) await txn.markBodyGaveUp(giveUp);
       if (retry.length) await txn.updateBodyQueue(retry);
     });
   } catch (err) {
@@ -182,9 +192,10 @@ export async function drainBodyQueue(ctx: BodiesContext): Promise<BodiesResult> 
   }
 
   out.fetched = writes.length;
-  out.dequeued += dequeue.length;
+  out.dequeued += dequeue.length + giveUp.length;
+  out.gaveUp += giveUp.length;
   out.failed = retry.length;
-  out.madeProgress = writes.length + dequeue.length > 0;
+  out.madeProgress = writes.length + dequeue.length + giveUp.length > 0;
   return out;
 }
 
@@ -195,15 +206,22 @@ async function recordBodyFailures(
   out: BodiesResult,
 ): Promise<void> {
   const retry: BodyQueueEntry[] = [];
-  const giveUp: RowKey[] = [];
+  const giveUp: Array<{ key: RowKey; reason: 'attempts' | 'notFound'; lastError?: string }> = [];
   for (const entry of entries) {
     const attempts = entry.attempts + 1;
     if (attempts >= MAX_BODY_ATTEMPTS) {
-      // §7.4: after 5 attempts the entry is dequeued and the message stays
-      // envelope-only — openable online, marked not-downloaded offline. Job C2 is
-      // the self-heal that may re-enqueue it later, and F41 is why that cannot
-      // reset the counter.
-      giveUp.push({ jmapAccountId: entry.jmapAccountId, id: entry.emailId });
+      // §7.4: after 5 attempts we stop and the message stays envelope-only — openable
+      // online, marked not-downloaded offline.
+      //
+      // Recorded as a DURABLE give-up. Deleting the row made the give-up rule hold
+      // only while the row existed: C2 re-inserted a fresh `attempts: 0` row on the
+      // next cycle, so a permanently-failing body retried five times per cycle
+      // forever. A completed reconcile is what clears this (§7.6 step 5).
+      giveUp.push({
+        key: { jmapAccountId: entry.jmapAccountId, id: entry.emailId },
+        reason: 'attempts',
+        lastError: message,
+      });
       continue;
     }
     retry.push({
@@ -216,13 +234,13 @@ async function recordBodyFailures(
   try {
     await ctx.store.transaction(async (txn) => {
       if (retry.length) await txn.updateBodyQueue(retry);
-      if (giveUp.length) await txn.dequeueBodies(giveUp);
+      if (giveUp.length) await txn.markBodyGaveUp(giveUp);
     });
   } catch (err) {
     ctx.log?.('error', `failed to record body failures: ${String(err)}`);
   }
   out.failed += retry.length;
-  out.dequeued += giveUp.length;
+  out.gaveUp += giveUp.length;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -242,27 +260,73 @@ export async function backfillBodies(ctx: BodiesContext): Promise<BodiesResult> 
   const out = emptyResult();
   if (ctx.itemBudget <= 0) return out;
 
+  // CAP-AWARE. Without this, C2 fights the evictor: bodies over the cap are shed,
+  // C2 notices the envelopes are inside the body WINDOW and re-enqueues them, they
+  // download again, the cap sheds them again — unbounded data and battery use, and
+  // the loop never terminates because there is always an envelope without a body.
+  //
+  // The window says WHICH bodies are wanted; the cap says HOW MANY fit. C2 must
+  // respect both, so it only enqueues while there is projected headroom. `size` is
+  // the RFC822 message size from the envelope tier — an estimate, but the right
+  // order of magnitude, and erring high just means enqueuing fewer per pass.
+  const used = await ctx.store.bodyBytesTotal();
+  let headroom = ctx.maxBodyBytes - used;
+  if (headroom <= 0) return out;
+
+  // THE FRONTIER. Headroom alone is not enough: the evictor sheds oldest-first, so
+  // anything older than the oldest body we currently keep is guaranteed to be the next
+  // thing evicted — enqueuing it is guaranteed waste, and C2 and the evictor would
+  // trade the same bytes back and forth forever.
+  //
+  // So when the cap is the binding constraint, the cap defines an EFFECTIVE body window
+  // narrower than the setting, and C2 works only inside it. That makes C2 monotone:
+  // it fills newest-first down to the frontier and then has nothing left to do.
+  let effectiveFrom = ctx.bodyFrom;
+  if (used > 0 && used >= ctx.maxBodyBytes * 0.9) {
+    const [oldestKept] = await ctx.store.listBodiesForEviction(1);
+    if (oldestKept && oldestKept.receivedAt > effectiveFrom) {
+      effectiveFrom = oldestKept.receivedAt;
+    }
+  }
+
   const candidates = await ctx.store.queryEnvelopes({
     jmapAccountId: ctx.jmapAccountId,
     hasBody: false,
-    receivedAfter: ctx.bodyFrom,
+    receivedAfter: effectiveFrom,
     limit: ctx.itemBudget,
   });
   if (candidates.length === 0) return out;
 
-  const entries: BodyQueueEntry[] = candidates
-    .filter((e) => !hasPendingDestroy(ctx.pending?.get(e.id)))
-    .map((e) => ({
+  // Rows with a durable terminal state are excluded here as well as by
+  // `enqueueBodies`'s insert-or-ignore — belt and braces, and it keeps the projected
+  // headroom honest.
+  const gaveUp = new Set(
+    (await ctx.store.listBodyGiveUps(ctx.jmapAccountId, 2000)).map((k) => k.id),
+  );
+
+  const entries: BodyQueueEntry[] = [];
+  for (const e of candidates) {
+    if (gaveUp.has(e.id)) continue;
+    if (hasPendingDestroy(ctx.pending?.get(e.id))) continue;
+    const estimate = e.size ?? 0;
+    if (entries.length > 0 && estimate > headroom) break;
+    headroom -= estimate;
+    entries.push({
       jmapAccountId: e.jmapAccountId,
       emailId: e.id,
       receivedAt: e.receivedAt,
       attempts: 0,
-    }));
+    });
+    if (headroom <= 0) break;
+  }
   if (entries.length === 0) return out;
 
-  await ctx.store.transaction((txn) => txn.enqueueBodies(entries));
-  out.enqueued = entries.length;
-  out.madeProgress = true;
+  // The INSERTED count, not the attempted count. Reporting the latter made the engine
+  // treat every cycle as having unfinished work for as long as any envelope lacked a
+  // body, chaining a new cycle every 5 s indefinitely.
+  const inserted = await ctx.store.transaction((txn) => txn.enqueueBodies(entries));
+  out.enqueued = inserted;
+  out.madeProgress = inserted > 0;
   return out;
 }
 
