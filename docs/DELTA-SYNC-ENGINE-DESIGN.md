@@ -418,7 +418,15 @@ export type SnapshotState = string & { readonly __brand: 'SnapshotState' };
 // A `unique symbol` field cannot be produced by an object literal outside this module
 // (the symbol isn't exported), so `EnumerationCommitment` is genuinely unforgeable rather
 // than unforgeable-by-convention.
-declare const enumerationCommitmentTag: unique symbol;
+//
+// IMPLEMENTATION NOTE (found by the Stage B build, not by either review round):
+// this must be a REAL symbol, not `declare const … : unique symbol`. `declare const` tells
+// the compiler "trust me, this exists" but emits no runtime value — using it as a computed
+// property key throws `ReferenceError` the first time anything actually constructs the
+// object. Use an unexported `const enumerationCommitmentTag = Symbol();` — TypeScript still
+// infers `unique symbol` for a symbol literal assigned to a `const`, so the type-level
+// unforgeability guarantee is identical; only the runtime existence changes.
+const enumerationCommitmentTag = Symbol();
 
 export interface EnumerationCommitment {
   readonly [enumerationCommitmentTag]: true;
@@ -429,8 +437,13 @@ export interface EnumerationCommitment {
   readonly kind: 'bootstrap' | 'reconcile';
 }
 
-/** The ONLY constructor. Exported from coverage.ts / reconcile.ts, not from states.ts,
- *  so the mint site and the enumeration that justifies it live in the same module. */
+/** The ONLY constructor. The design's original intent was to export this from
+ *  coverage.ts / reconcile.ts (Stage C), so the mint site and the enumeration that
+ *  justifies it live in the same module. Stage B ships before Stage C exists, and the
+ *  tag must stay unexported for unforgeability to hold — so for now the tag and factory
+ *  both live in states.ts. When coverage.ts/reconcile.ts land, move the tag and this
+ *  factory together (not just re-export the factory — the tag must move with it, or a
+ *  second tag in states.ts would make two incompatible "unforgeable" types). */
 export function mintEnumerationCommitment(args: {
   jmapAccountId: JmapAccountId;
   snapshot: SnapshotState;
