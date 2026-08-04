@@ -4,7 +4,7 @@
 // OfflineCacheBanner and the Settings screen can show live updates.
 
 import { jmapClient } from '../api/jmap-client';
-import { queryEmailsByFilter, getFullEmails } from '../api/email';
+import { queryEmailsByFilter, getFullEmails, getEmails } from '../api/email';
 import { useOfflineCacheStore } from '../stores/offline-cache-store';
 import type { Email } from '../api/types';
 
@@ -36,14 +36,24 @@ export interface RunOptions {
 
 export async function runOfflineSync(opts: RunOptions): Promise<void> {
   const cache = useOfflineCacheStore.getState();
-  // If a sync is in flight, request its abort and wait for the next caller
-  // to start fresh. We don't queue — the most recent intent wins.
+  // If a sync is already in flight, leave it alone: it will pick up any mail
+  // the user is waiting for. Cancelling it here would abandon an
+  // already-paid-for fetch and start over, and the caller has no way to
+  // queue a follow-up run — so a redundant call is just a no-op.
   if (cache.sync.phase === 'scanning' || cache.sync.phase === 'fetching') {
-    cache.requestAbort();
     return;
   }
   if (!cache.hydrated) await cache.hydrate();
   cache.resetSync();
+
+  // Pin the account this run is syncing for. `jmapClient.accountId` reflects
+  // whatever account is *currently* connected, which can change mid-run if
+  // the user switches accounts — every JMAP call below must keep targeting
+  // this snapshot, not wherever the client ends up pointing.
+  const syncAccountId = jmapClient.accountId;
+  const accountChanged = () =>
+    useOfflineCacheStore.getState().activeAccountId !== syncAccountId ||
+    jmapClient.accountId !== syncAccountId;
 
   const startedAt = Date.now();
   cache.setSyncState({ phase: 'scanning', startedAt });
@@ -52,13 +62,22 @@ export async function runOfflineSync(opts: RunOptions): Promise<void> {
 
   let ids: string[] = [];
   try {
-    ids = await queryEmailsByFilter({ after: since }, DISCOVERY_LIMIT);
+    ids = await queryEmailsByFilter({ after: since }, DISCOVERY_LIMIT, syncAccountId);
   } catch (err) {
     cache.setSyncState({
       phase: 'error',
       message: err instanceof Error ? err.message : 'Discovery query failed',
       finishedAt: Date.now(),
     });
+    return;
+  }
+
+  // The account may have switched while the discovery query was in flight.
+  // `ids` and everything derived from them below belong to `syncAccountId`;
+  // touching the (now different) active account's index with them would
+  // wrongly evict or report against its cache. Bail out like a cancellation.
+  if (accountChanged()) {
+    cache.setSyncState({ phase: 'cancelled', finishedAt: Date.now() });
     return;
   }
 
@@ -73,10 +92,54 @@ export async function runOfflineSync(opts: RunOptions): Promise<void> {
   const total = ids.length;
   cache.setSyncState({ phase: 'fetching', total, completed: 0, fetched: 0, bytes: 0 });
 
-  // Skip already-cached ids — bodies on disk are immutable per messageId.
+  // Bodies on disk are immutable per messageId, so already-cached ids skip
+  // the (expensive) full body fetch below. But `keywords` and `mailboxIds`
+  // are mutable and live in the same cached blob — without refreshing them,
+  // read/unread state and folder membership read offline would go stale
+  // forever. Refresh just those two properties for already-cached ids.
   const toFetch = ids.filter((id) => !cache.has(id));
-  const skipped = total - toFetch.length;
-  cache.setSyncState({ completed: skipped });
+  const toRefresh = ids.filter((id) => cache.has(id));
+
+  const chunkSize = Math.min(
+    FETCH_CHUNK_FALLBACK,
+    Math.max(1, jmapClient.getMaxObjectsInGet()),
+  );
+
+  let fetched = 0;
+  let bytes = 0;
+  let completed = 0;
+
+  for (let i = 0; i < toRefresh.length; i += chunkSize) {
+    if (useOfflineCacheStore.getState().consumeAbort() || accountChanged()) {
+      cache.setSyncState({
+        phase: 'cancelled',
+        finishedAt: Date.now(),
+      });
+      return;
+    }
+
+    const chunk = toRefresh.slice(i, i + chunkSize);
+    let refreshed: Email[];
+    try {
+      refreshed = await getEmails(chunk, syncAccountId);
+    } catch (err) {
+      cache.setSyncState({
+        phase: 'error',
+        message: err instanceof Error ? err.message : 'Refresh failed',
+        finishedAt: Date.now(),
+      });
+      return;
+    }
+
+    for (const email of refreshed) {
+      await cache.patch(email.id, { keywords: email.keywords, mailboxIds: email.mailboxIds });
+    }
+    // Ids deleted server-side between query and refresh don't come back;
+    // count them as processed so the progress bar still finishes at 100%.
+    completed += chunk.length;
+
+    cache.setSyncState({ completed });
+  }
 
   if (toFetch.length === 0) {
     if (opts.maxMB) await cache.evictToFit(opts.maxMB * 1024 * 1024);
@@ -87,17 +150,8 @@ export async function runOfflineSync(opts: RunOptions): Promise<void> {
     return;
   }
 
-  const chunkSize = Math.min(
-    FETCH_CHUNK_FALLBACK,
-    Math.max(1, jmapClient.getMaxObjectsInGet()),
-  );
-
-  let fetched = 0;
-  let bytes = 0;
-  let completed = skipped;
-
   for (let i = 0; i < toFetch.length; i += chunkSize) {
-    if (useOfflineCacheStore.getState().consumeAbort()) {
+    if (useOfflineCacheStore.getState().consumeAbort() || accountChanged()) {
       cache.setSyncState({
         phase: 'cancelled',
         finishedAt: Date.now(),
@@ -108,7 +162,7 @@ export async function runOfflineSync(opts: RunOptions): Promise<void> {
     const chunk = toFetch.slice(i, i + chunkSize);
     let emails: Email[];
     try {
-      emails = await getFullEmails(chunk);
+      emails = await getFullEmails(chunk, syncAccountId);
     } catch (err) {
       cache.setSyncState({
         phase: 'error',
