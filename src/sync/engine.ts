@@ -264,9 +264,22 @@ export class SyncEngine {
     const rawFloors = computeFloors(policy, startedAt);
 
     // F44 — clock-jump guard on the retention boundary.
-    const guarded = guardFloorAgainstClockJump(rawFloors.envelopeFrom, state.lastWindowFloor, {
-      alreadyConfirmed: state.lastWindowFloor === rawFloors.envelopeFrom,
-    });
+    //
+    // Skipped when `envelopeDays` itself changed: that is the user editing the
+    // setting, which is intent rather than a glitch, and guarding it would make the
+    // Settings change appear not to take effect.
+    const policyChanged =
+      state.lastEnvelopeDays !== undefined && state.lastEnvelopeDays !== policy.envelopeDays;
+    const guarded = policyChanged
+      ? {
+          envelopeFrom: rawFloors.envelopeFrom,
+          suppressed: false,
+          nextLastWindowFloor: rawFloors.envelopeFrom,
+          warning: undefined,
+        }
+      : guardFloorAgainstClockJump(rawFloors.envelopeFrom, state.lastWindowFloor, {
+          alreadyConfirmed: state.lastWindowFloor === rawFloors.envelopeFrom,
+        });
     if (guarded.suppressed && guarded.warning) this.log('warn', guarded.warning);
     const envelopeFrom = guarded.envelopeFrom;
     // The body floor can never be older than the (possibly held) envelope floor.
@@ -365,10 +378,18 @@ export class SyncEngine {
       // correctness dependency: folder rows are what the list UI resolves names and
       // roles against, and §9.3 deliberately has no email->mailbox FK because the two
       // streams are not transactionally coupled.
+      // While a reconcile is in progress, everything this cycle writes must be
+      // stamped at or above the reconcile's pin, or the sweep would delete records the
+      // live delta path just created (S9 makes delta run alongside the enumeration).
+      const reconcileStamp = coverage?.reconcileStampedAt;
+      const cachedAtStamp =
+        reconcileStamp !== undefined ? Math.max(this.now(), reconcileStamp) : undefined;
+
       const drainCtxBase: Omit<DrainContext, 'pageBudget'> = {
         ...commonCtx,
         bodyFrom,
         pending,
+        cachedAtStamp,
       };
 
       for (const type of ['Mailbox', 'Email'] as CursorType[]) {
@@ -433,6 +454,8 @@ export class SyncEngine {
 
         if (coverage && (coverage.phase === 'scanning' || coverage.phase === 'reconciling')) {
           phases.push(`coverage:${coverage.phase}`);
+          // Reconcile: stamp EXACTLY the pin, so `cached_at < pin` means "not re-seen
+          // by this enumeration" and a re-seen record (cached_at === pin) survives.
           const stampedAt =
             coverage.phase === 'reconciling'
               ? (coverage.reconcileStampedAt ?? this.now())
@@ -514,6 +537,10 @@ export class SyncEngine {
       const finalState = await store.loadAccountState();
       unfinishedWork =
         unfinishedWork ||
+        // A suppressed floor change is pending adoption on the next observation, so
+        // the cycle is NOT done — otherwise the change sits unapplied until some
+        // unrelated trigger happens along. This is exactly what T9 exists for (S8).
+        guarded.suppressed ||
         finalState.resyncRequired ||
         finalState.cursors.some((c) => c.drainPending) ||
         finalState.coverage.some(
@@ -532,6 +559,7 @@ export class SyncEngine {
         txn.patchAccountFlags({
           lastCycle,
           lastWindowFloor: guarded.nextLastWindowFloor,
+          lastEnvelopeDays: policy.envelopeDays,
         }),
       );
 

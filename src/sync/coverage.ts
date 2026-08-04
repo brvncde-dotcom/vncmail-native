@@ -500,7 +500,13 @@ export async function beginReconcile(
   // Step 0: PIN THE FLOOR. Every later step reads sweepFloor, never a live
   // targetFrom. This is S2.
   const sweepFloor = coverage?.deferredTargetFrom ?? ctx.envelopeFrom;
-  const stampedAt = ctx.now();
+  // The stamp must be STRICTLY greater than every `cachedAt` already in the store,
+  // or the sweep's "not re-seen" predicate silently matches nothing (two writes in
+  // the same millisecond, a frozen clock in a test, or a device with coarse timers).
+  // Deriving it from the data instead of the clock makes the predicate exact and
+  // keeps it clock-independent, per I8.
+  const maxCachedAt = await ctx.store.maxEnvelopeCachedAt(ctx.jmapAccountId);
+  const stampedAt = Math.max(ctx.now(), maxCachedAt + 1);
 
   try {
     const snapshots = await ctx.port.captureStates(ctx.jmapAccountId);

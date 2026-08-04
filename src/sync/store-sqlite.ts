@@ -867,6 +867,16 @@ class SqliteStore implements SyncStore {
     return row?.c ?? 0;
   }
 
+  async maxEnvelopeCachedAt(jmapAccountId: JmapAccountId): Promise<number> {
+    const db = await this.dbForRead();
+    if (!db) return 0;
+    const row = await db.getFirstAsync<{ max_cached: number | null }>(
+      'SELECT MAX(cached_at) AS max_cached FROM envelope WHERE jmap_account_id = ?',
+      [jmapAccountId],
+    );
+    return row?.max_cached ?? 0;
+  }
+
   async bodyBytesTotal(): Promise<number> {
     const db = await this.dbForRead();
     if (!db) return 0;

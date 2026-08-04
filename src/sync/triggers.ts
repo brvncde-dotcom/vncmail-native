@@ -132,18 +132,20 @@ export class TriggerCoordinator {
     }
 
     const existing = this.pending.get(accountId);
-    if (existing?.timer) {
-      // A more urgent reason upgrades the pending trigger rather than queueing a
-      // second timer.
-      if (DEBOUNCE_MS[reason] < DEBOUNCE_MS[existing.reason]) {
-        this.pending.set(accountId, { timer: true, reason, mode });
-      }
+    if (existing?.timer && DEBOUNCE_MS[reason] >= DEBOUNCE_MS[existing.reason]) {
+      // Already covered by a pending trigger that will fire at least as soon.
       return;
     }
 
-    const delay = DEBOUNCE_MS[reason] + this.jitterFor(reason);
+    // A more urgent reason takes over the pending slot AND gets its own, shorter
+    // timer. Upgrading only the reason would leave a "Sync now" tapped 100 ms after
+    // launch waiting out the remaining cold-start debounce, which contradicts
+    // "user-initiated triggers are never delayed" (§10.1).
     this.pending.set(accountId, { timer: true, reason, mode });
+    const delay = DEBOUNCE_MS[reason] + this.jitterFor(reason);
     this.schedule(() => {
+      // Whichever timer fires first consumes the slot; later ones find it empty and
+      // no-op, so an upgrade never produces two cycles.
       const current = this.pending.get(accountId);
       this.pending.delete(accountId);
       if (!current) return;

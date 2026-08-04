@@ -197,6 +197,16 @@ export interface AccountSyncState {
   reconcileWindowStartedAt: number;
   /** Last observed retention floor, for the clock-jump guard of F44. */
   lastWindowFloor?: string;
+  /**
+   * The `envelopeDays` that produced `lastWindowFloor`.
+   *
+   * F44's guard exists to stop a device-clock jump from moving the retention
+   * boundary. But the computed floor moves for TWO independent reasons — the clock
+   * changing and the SETTING changing — and guarding a setting change is wrong: it
+   * is explicit user intent, not a glitch. Recording the policy alongside the floor
+   * is what tells them apart.
+   */
+  lastEnvelopeDays?: number;
   lastCycle?: LastCycle;
 }
 
@@ -209,6 +219,7 @@ export type AccountFlagsPatch = Partial<
     | 'reconcilesInWindow'
     | 'reconcileWindowStartedAt'
     | 'lastWindowFloor'
+    | 'lastEnvelopeDays'
   >
 >;
 
@@ -360,6 +371,15 @@ export interface SyncStore {
   /** Indexed. */
   queryEnvelopes(q: EnvelopeQuery): Promise<EnvelopeRow[]>;
   countEnvelopes(q?: { jmapAccountId?: JmapAccountId; mailboxId?: string }): Promise<number>;
+  /**
+   * Largest `cachedAt` currently stored, or 0 when empty.
+   *
+   * Used to pin a reconcile's stamp STRICTLY above everything already written, so
+   * the sweep's "not re-seen by this enumeration" predicate does not depend on the
+   * device clock having advanced between two operations — which would be both an I8
+   * violation and a real bug on a device with coarse timers.
+   */
+  maxEnvelopeCachedAt(jmapAccountId: JmapAccountId): Promise<number>;
   bodyBytesTotal(): Promise<number>;
   /** Oldest-body-first, from the body table alone (S12: it carries received_at). */
   listBodiesForEviction(

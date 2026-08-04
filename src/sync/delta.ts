@@ -49,6 +49,14 @@ export interface DrainContext {
   /** Cooperative deadline, checked between pages (§6.4, §10.5). */
   deadlineAt: number;
   now(): number;
+  /**
+   * The `cachedAt` to stamp onto envelopes this cycle writes. Defaults to `now()`.
+   *
+   * While a reconcile is in progress the engine raises this to the reconcile's pinned
+   * stamp, so a message the LIVE delta path creates mid-reconcile (S9) is not mistaken
+   * by the sweep for a record the enumeration failed to re-see.
+   */
+  cachedAtStamp?: number;
   /** Abort at the next page boundary: background, logout, T10, network loss (§10.3). */
   shouldAbort(): boolean;
   log?: (level: 'warn' | 'error' | 'info', message: string) => void;
@@ -214,7 +222,7 @@ export async function drainEmailChanges(
         notFound: [...created.notFound, ...updated.notFound],
         bodyFrom: ctx.bodyFrom,
         pending: ctx.pending,
-        now: ctx.now(),
+        now: ctx.cachedAtStamp ?? ctx.now(),
       });
 
       if (applied.skippedNotFound.length) {
