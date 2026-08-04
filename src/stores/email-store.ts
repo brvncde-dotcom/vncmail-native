@@ -80,6 +80,33 @@ function rawMailboxId(mailboxes: Mailbox[], mailboxId: string): string {
 
 // The JMAP account behind the folder currently on screen. Undefined for the
 // user's own folders, which keeps every own-mail call on the default path.
+/**
+ * Record a local mutation, or report that it could not be recorded.
+ *
+ * Returns false when the outbox refused the write, in which case the caller MUST NOT
+ * apply its optimistic update — the store would otherwise show a state that exists
+ * nowhere, which is the failure §5.6.1's durability fix was for.
+ *
+ * The rejection is swallowed here on purpose. ~15 UI call sites invoke these mutations
+ * with `void` and no handler, and the store is the component that owns the optimistic
+ * update, so it is the right place to own the rollback and the user-facing signal.
+ * Pushing the responsibility outward would mean editing every call site and still
+ * missing the next one added.
+ */
+async function recordMutation(
+  label: string,
+  run: () => Promise<{ queued: boolean }>,
+): Promise<{ ok: true; queued: boolean } | { ok: false }> {
+  try {
+    const result = await run();
+    return { ok: true, queued: result.queued };
+  } catch (err) {
+    console.warn('[email-store] could not record mutation', label, err);
+    useEmailStore.setState({ notice: { label, createdAt: Date.now() } });
+    return { ok: false };
+  }
+}
+
 function currentAccountId(state: EmailState): string | undefined {
   if (!state.currentMailboxId) return undefined;
   return refFor(state.mailboxes, state.currentMailboxId).accountId;
@@ -151,6 +178,20 @@ export interface EmailFilters {
 // Snapshot of an action that can still be reversed via the undo snackbar.
 // We store the full email object so undo can re-insert it into the visible list
 // optimistically without waiting for a refetch.
+/**
+ * A transient "that didn't stick" message for the snackbar.
+ *
+ * Local mutations are optimistic and, since §5.6 removed the write-through into the
+ * durable record store, the outbox is the SOLE durable record of intent. So a failure to
+ * record one is not a cosmetic problem: the user's action is simply gone. Making the
+ * store own the notice (rather than ~15 `void` UI call sites each catching for
+ * themselves) is what makes that reliably visible.
+ */
+export interface MutationNotice {
+  label: string;
+  createdAt: number;
+}
+
 export interface UndoEntry {
   kind: 'archive' | 'delete' | 'move' | 'spam';
   /** Human-readable label shown in the snackbar (e.g. "Email archived"). */
@@ -207,9 +248,25 @@ export interface EmailState {
   // ── UI state (not persisted, not per-account) ─────────────────
   loading: boolean;
   error: string | null;
+  /** Transient failure feedback for a local mutation (see MutationNotice). */
+  notice: MutationNotice | null;
   searchQuery: string;
   filters: EmailFilters;
   pendingUndo: UndoEntry | null;
+  clearNotice: () => void;
+  /**
+   * Set an arbitrary keyword map on one message, through the outbox.
+   *
+   * Exists because every other mutation bails with `if (!email) return` when the message
+   * is not in `state.emails` — which is exactly the case for a thread pane, and why
+   * EmailThreadScreen used to call `setEmailKeywords` directly and bypass the outbox
+   * entirely.
+   */
+  setKeywordsFor: (
+    emailId: string,
+    keywords: Record<string, boolean>,
+    accountId?: string,
+  ) => Promise<void>;
 
   // ── Actions ────────────────────────────────────────────────────
   setActiveAccount: (accountId: string | null) => void;
@@ -419,6 +476,7 @@ export const useEmailStore = create<EmailState>()(
 
   loading: false,
   error: null,
+  notice: null,
   searchQuery: '',
   filters: {},
   pendingUndo: null,
@@ -1082,7 +1140,10 @@ export const useEmailStore = create<EmailState>()(
       return;
     }
     const owner = accountId ?? currentAccountId(state);
-    await applyOrQueue({ kind: 'keywords', emailId, accountId: owner, keywords: nextKeywords });
+    const recorded = await recordMutation('Couldn\u2019t mark as read', () =>
+      applyOrQueue({ kind: 'keywords', emailId, accountId: owner, keywords: nextKeywords }),
+    );
+    if (!recorded.ok) return;
     set({
       emails: get().emails.map((e) =>
         e.id === emailId ? { ...e, keywords: nextKeywords } : e,
@@ -1091,17 +1152,48 @@ export const useEmailStore = create<EmailState>()(
     patchCache(emailId, { keywords: nextKeywords });
   },
 
+  clearNotice: () => set({ notice: null }),
+
+  setKeywordsFor: async (emailId, keywords, accountId) => {
+    const state = get();
+    const owner = accountId ?? currentAccountId(state);
+    // A shared/group account stays online-only, exactly as `markRead` already treats it:
+    // the outbox is account-scoped and v1 syncs the primary mail account only (§8.2).
+    if (accountId && accountId !== currentAccountId(state)) {
+      try {
+        await setEmailKeywords(emailId, keywords, accountId);
+      } catch (err) {
+        console.warn('[email-store] shared-account keyword change failed', err);
+        set({ notice: { label: 'Couldn\u2019t save that change', createdAt: Date.now() } });
+      }
+      return;
+    }
+    const recorded = await recordMutation('Couldn\u2019t save that change', () =>
+      applyOrQueue({ kind: 'keywords', emailId, accountId: owner, keywords }),
+    );
+    if (!recorded.ok) return;
+    // The message may not be in the visible list at all (a thread pane), in which case
+    // there is simply no row to patch — the outbox record is the point.
+    set({
+      emails: get().emails.map((e) => (e.id === emailId ? { ...e, keywords } : e)),
+    });
+    patchCache(emailId, { keywords });
+  },
+
   markUnread: async (emailId) => {
     const state = get();
     const email = state.emails.find((e) => e.id === emailId);
     if (!email) return;
     const { $seen, ...rest } = email.keywords;
-    await applyOrQueue({
-      kind: 'keywords',
-      emailId,
-      accountId: currentAccountId(state),
-      keywords: rest,
-    });
+    const recorded = await recordMutation('Couldn\u2019t mark as unread', () =>
+      applyOrQueue({
+        kind: 'keywords',
+        emailId,
+        accountId: currentAccountId(state),
+        keywords: rest,
+      }),
+    );
+    if (!recorded.ok) return;
     set({
       emails: get().emails.map((e) =>
         e.id === emailId ? { ...e, keywords: rest } : e,
@@ -1120,12 +1212,17 @@ export const useEmailStore = create<EmailState>()(
     } else {
       delete keywords.$flagged;
     }
-    await applyOrQueue({
-      kind: 'keywords',
-      emailId,
-      accountId: currentAccountId(state),
-      keywords,
-    });
+    const recorded = await recordMutation(
+      starred ? 'Couldn\u2019t star that message' : 'Couldn\u2019t unstar that message',
+      () =>
+        applyOrQueue({
+          kind: 'keywords',
+          emailId,
+          accountId: currentAccountId(state),
+          keywords,
+        }),
+    );
+    if (!recorded.ok) return;
     set({
       emails: get().emails.map((e) =>
         e.id === emailId ? { ...e, keywords } : e,
@@ -1144,12 +1241,15 @@ export const useEmailStore = create<EmailState>()(
     } else {
       delete keywords.$important;
     }
-    await applyOrQueue({
-      kind: 'keywords',
-      emailId,
-      accountId: currentAccountId(state),
-      keywords,
-    });
+    const recorded = await recordMutation('Couldn\u2019t update that message', () =>
+      applyOrQueue({
+        kind: 'keywords',
+        emailId,
+        accountId: currentAccountId(state),
+        keywords,
+      }),
+    );
+    if (!recorded.ok) return;
     set({
       emails: get().emails.map((e) =>
         e.id === emailId ? { ...e, keywords } : e,
@@ -1173,10 +1273,13 @@ export const useEmailStore = create<EmailState>()(
     const original = email ? { ...email.mailboxIds } : null;
     const target = mailboxesAfterMove(email?.mailboxIds, from.id, to.id);
 
-    await applyOrQueue(
-      { kind: 'mailboxes', emailId, accountId: from.accountId, mailboxIds: target },
-      () => moveEmail(emailId, from.id, to.id, from.accountId),
+    const recorded = await recordMutation('Couldn\u2019t move that message', () =>
+      applyOrQueue(
+        { kind: 'mailboxes', emailId, accountId: from.accountId, mailboxIds: target },
+        () => moveEmail(emailId, from.id, to.id, from.accountId),
+      ),
     );
+    if (!recorded.ok) return;
     set({ emails: get().emails.filter((e) => e.id !== emailId) });
     patchCache(emailId, { mailboxIds: target });
 
@@ -1215,7 +1318,8 @@ export const useEmailStore = create<EmailState>()(
     // Online keeps the rich year/month auto-foldering. Offline degrades to the
     // archive root (we can't create folders without a connection); the queued
     // op replays as a plain move into Archive.
-    const { queued } = await applyOrQueue(
+    const recorded = await recordMutation('Couldn\u2019t archive that message', () =>
+      applyOrQueue(
       {
         kind: 'mailboxes',
         emailId,
@@ -1229,7 +1333,10 @@ export const useEmailStore = create<EmailState>()(
         toRawMailboxes(scoped),
         archive.accountId,
       ),
+      ),
     );
+    if (!recorded.ok) return;
+    const queued = recorded.queued;
 
     set({
       emails: get().emails.filter((e) => e.id !== emailId),
@@ -1277,27 +1384,37 @@ export const useEmailStore = create<EmailState>()(
     if (destroy) {
       // Use the trash mailbox as the "current" so apiDeleteEmail takes the
       // destroy branch even when the source folder isn't trash.
-      await applyOrQueue(
-        { kind: 'destroy', emailId, accountId: trash.accountId },
-        () => apiDeleteEmail(emailId, trash.id, trash.id, trash.accountId),
+      const recorded = await recordMutation('Couldn\u2019t delete that message', () =>
+        applyOrQueue(
+          { kind: 'destroy', emailId, accountId: trash.accountId },
+          () => apiDeleteEmail(emailId, trash.id, trash.id, trash.accountId),
+        ),
       );
+      if (!recorded.ok) return;
       dropFromCache([emailId]);
     } else {
       const target = mailboxesAfterMove(email?.mailboxIds, source.id, trash.id);
-      await applyOrQueue(
-        { kind: 'mailboxes', emailId, accountId: source.accountId, mailboxIds: target },
-        () => apiDeleteEmail(emailId, trash.id, source.id, source.accountId),
+      const recorded = await recordMutation('Couldn\u2019t delete that message', () =>
+        applyOrQueue(
+          { kind: 'mailboxes', emailId, accountId: source.accountId, mailboxIds: target },
+          () => apiDeleteEmail(emailId, trash.id, source.id, source.accountId),
+        ),
       );
+      if (!recorded.ok) return;
       // "Move to Trash and mark as read" (#323): when the user picked that
       // delete action, also clear unread state for messages moved to trash.
       if (settings.deleteAction === 'trash-and-read' && email && !email.keywords?.$seen) {
         const nextKeywords = { ...email.keywords, $seen: true };
-        await applyOrQueue({
-          kind: 'keywords',
-          emailId,
-          accountId: source.accountId,
-          keywords: nextKeywords,
-        });
+        // Best effort: the move already landed, so a failure here leaves the message in
+        // Trash but still unread rather than undoing the delete.
+        await recordMutation('Moved to Trash, but couldn\u2019t mark it read', () =>
+          applyOrQueue({
+            kind: 'keywords',
+            emailId,
+            accountId: source.accountId,
+            keywords: nextKeywords,
+          }),
+        );
         patchCache(emailId, { mailboxIds: target, keywords: nextKeywords });
       } else {
         patchCache(emailId, { mailboxIds: target });
@@ -1341,7 +1458,8 @@ export const useEmailStore = create<EmailState>()(
     const items = targets.map((e) => ({ email: e, originalMailboxIds: { ...e.mailboxIds } }));
     const archiveTarget = { [archive.id]: true };
 
-    const { queued } = await applyOrQueueBatch(
+    const recorded = await recordMutation('Couldn\u2019t archive those messages', () =>
+      applyOrQueueBatch(
       targets.map((e): OutboxOp => ({
         kind: 'mailboxes',
         emailId: e.id,
@@ -1355,7 +1473,10 @@ export const useEmailStore = create<EmailState>()(
         toRawMailboxes(scoped),
         archive.accountId,
       ),
+      ),
     );
+    if (!recorded.ok) return;
+    const queued = recorded.queued;
 
     const removed = new Set(targets.map((e) => e.id));
     set({
@@ -1388,15 +1509,18 @@ export const useEmailStore = create<EmailState>()(
 
     const items = targets.map((e) => ({ email: e, originalMailboxIds: { ...e.mailboxIds } }));
 
-    await applyOrQueueBatch(
-      targets.map((e): OutboxOp => ({
-        kind: 'mailboxes',
-        emailId: e.id,
-        accountId: source.accountId,
-        mailboxIds: mailboxesAfterMove(e.mailboxIds, source.id, to.id),
-      })),
-      () => apiMoveEmails(targets.map((e) => e.id), source.id, to.id, source.accountId),
+    const recorded = await recordMutation('Couldn\u2019t move those messages', () =>
+      applyOrQueueBatch(
+        targets.map((e): OutboxOp => ({
+          kind: 'mailboxes',
+          emailId: e.id,
+          accountId: source.accountId,
+          mailboxIds: mailboxesAfterMove(e.mailboxIds, source.id, to.id),
+        })),
+        () => apiMoveEmails(targets.map((e) => e.id), source.id, to.id, source.accountId),
+      ),
     );
+    if (!recorded.ok) return;
 
     const removed = new Set(targets.map((e) => e.id));
     for (const e of targets) {
@@ -1472,7 +1596,8 @@ export const useEmailStore = create<EmailState>()(
         keywords: markReadKeywords.get(e.id)!,
       })),
     ];
-    await applyOrQueueBatch(ops, async () => {
+    const recorded = await recordMutation('Couldn\u2019t delete those messages', () =>
+      applyOrQueueBatch(ops, async () => {
       if (toDestroy.length > 0) {
         await apiDeleteEmails(toDestroy.map((e) => e.id), trash.id, trash.id, trash.accountId);
       }
@@ -1485,7 +1610,9 @@ export const useEmailStore = create<EmailState>()(
           source.accountId,
         );
       }
-    });
+      }),
+    );
+    if (!recorded.ok) return;
 
     if (toDestroy.length > 0) dropFromCache(toDestroy.map((e) => e.id));
     for (const e of toTrash) {
@@ -1523,15 +1650,18 @@ export const useEmailStore = create<EmailState>()(
       else delete keywords[token];
       return { id: e.id, keywords };
     });
-    await applyOrQueueBatch(
-      updates.map((u): OutboxOp => ({
-        kind: 'keywords',
-        emailId: u.id,
-        accountId: owner,
-        keywords: u.keywords,
-      })),
-      () => setKeywordsForEmails(updates, owner),
+    const recorded = await recordMutation('Couldn\u2019t update those messages', () =>
+      applyOrQueueBatch(
+        updates.map((u): OutboxOp => ({
+          kind: 'keywords',
+          emailId: u.id,
+          accountId: owner,
+          keywords: u.keywords,
+        })),
+        () => setKeywordsForEmails(updates, owner),
+      ),
     );
+    if (!recorded.ok) return;
     const byId = new Map(updates.map((u) => [u.id, u.keywords]));
     set({
       emails: get().emails.map((e) =>
@@ -1563,7 +1693,12 @@ export const useEmailStore = create<EmailState>()(
         patchCache(it.email.id, { mailboxIds: it.originalMailboxIds });
       }
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : 'Undo failed' });
+      // Already the one guarded call site; the notice makes it consistent with the rest,
+      // since `error` only renders when the list is empty.
+      set({
+        error: err instanceof Error ? err.message : 'Undo failed',
+        notice: { label: 'Couldn\u2019t undo that', createdAt: Date.now() },
+      });
       return;
     }
 

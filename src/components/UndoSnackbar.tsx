@@ -11,9 +11,31 @@ export function UndoSnackbar() {
   const c = useColors();
   const styles = React.useMemo(() => makeStyles(c), [c]);
   const insets = useSafeAreaInsets();
-  const entry = useEmailStore((s) => s.pendingUndo);
+  const undoEntry = useEmailStore((s) => s.pendingUndo);
+  const notice = useEmailStore((s) => s.notice);
   const undoLast = useEmailStore((s) => s.undoLast);
   const clearUndo = useEmailStore((s) => s.clearUndo);
+  const clearNotice = useEmailStore((s) => s.clearNotice);
+
+  // One surface, two payloads. A failed local mutation ("couldn't star that message")
+  // needs the same transient, non-blocking treatment an undo does, and reusing this
+  // component means reusing its animation, timer and safe-area handling rather than
+  // introducing a second snackbar that behaves subtly differently.
+  //
+  // An undo wins when both are present: it is the more actionable of the two.
+  const entry = React.useMemo(
+    () =>
+      undoEntry
+        ? { label: undoEntry.label, createdAt: undoEntry.createdAt, undoable: true }
+        : notice
+          ? { label: notice.label, createdAt: notice.createdAt, undoable: false }
+          : null,
+    [undoEntry, notice],
+  );
+  const dismiss = React.useCallback(() => {
+    if (undoEntry) clearUndo();
+    else clearNotice();
+  }, [undoEntry, clearUndo, clearNotice]);
   const slideY = React.useRef(new Animated.Value(120)).current;
   const opacity = React.useRef(new Animated.Value(0)).current;
   // Remember the last non-null entry so the bar's text/handlers stay valid
@@ -45,13 +67,13 @@ export function UndoSnackbar() {
     const elapsed = Date.now() - entry.createdAt;
     const remaining = Math.max(0, VISIBLE_MS - elapsed);
     const id = setTimeout(() => {
-      // Only clear if the entry is still the same one we scheduled for.
-      if (useEmailStore.getState().pendingUndo === entry) {
-        clearUndo();
-      }
+      // Only clear if what is showing is still the thing we scheduled for.
+      const live = useEmailStore.getState();
+      if (live.pendingUndo?.createdAt === entry.createdAt) clearUndo();
+      else if (live.notice?.createdAt === entry.createdAt) clearNotice();
     }, remaining);
     return () => clearTimeout(id);
-  }, [entry, slideY, opacity, clearUndo]);
+  }, [entry, slideY, opacity, clearUndo, clearNotice]);
 
   if (!shown) return null;
 
@@ -64,13 +86,13 @@ export function UndoSnackbar() {
       ]}
     >
       <View style={styles.bar}>
-        <Text style={styles.label} numberOfLines={1}>{shown.label}</Text>
+        <Text style={styles.label} numberOfLines={2}>{shown.label}</Text>
         <Pressable
-          onPress={() => { void undoLast(); }}
+          onPress={() => { if (shown.undoable) void undoLast(); else dismiss(); }}
           hitSlop={8}
           style={({ pressed }) => [styles.undoBtn, pressed && styles.undoBtnPressed]}
         >
-          <Text style={styles.undoText}>UNDO</Text>
+          <Text style={styles.undoText}>{shown.undoable ? 'UNDO' : 'DISMISS'}</Text>
         </Pressable>
       </View>
     </Animated.View>
