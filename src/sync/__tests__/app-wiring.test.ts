@@ -367,3 +367,28 @@ describe('the status store reflects the engine, for the banner (step 5)', () => 
     host.cleanup();
   });
 });
+
+describe('§8.4: turning the feature off purges the store', () => {
+  it('removes every account\'s store and leaves it ready to bootstrap', async () => {
+    // The user's intent in switching offline mail off is "don't keep my mail on this
+    // device", and once the store is encrypted a dormant database plus a live key in
+    // expo-secure-store is a liability with no benefit. Re-enabling costs a full
+    // bootstrap, which is why the Settings toggle confirms first.
+    w = build();
+    seed(w.server, 3);
+    w.coordinator.fire('session');
+    await w.tick(2_000);
+    expect(await w.factory.isMaterialised(ACCOUNT)).toBe(true);
+
+    for (const id of await w.factory.listAccounts()) {
+      await w.factory.purgeAccount(id, 'feature-disabled');
+    }
+
+    expect(await w.factory.isMaterialised(ACCOUNT)).toBe(false);
+    const reopened = await w.factory.open(ACCOUNT);
+    // A stale cursor surviving a purge would be catastrophic: it would be advanced
+    // against a freshly-empty store, skipping changes no /changes page can re-report.
+    expect((await reopened.loadAccountState()).cursors).toEqual([]);
+    expect(await reopened.countEnvelopes()).toBe(0);
+  });
+});

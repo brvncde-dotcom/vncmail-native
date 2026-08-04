@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, Pressable, Linking, Alert, ActivityIndicator } 
 import Constants from 'expo-constants';
 import { CloudDownload, ExternalLink } from 'lucide-react-native';
 import { SettingsSection, SettingItem, Select, ToggleSwitch } from './settings-section';
+import { purgeOfflineStores } from '../../sync/purge-helpers';
 import Button from '../Button';
 import { spacing, radius, typography, type ThemePalette } from '../../theme/tokens';
 import { useColors } from '../../theme/colors';
@@ -22,6 +23,26 @@ const DAY_OPTIONS = [
   { value: '30', label: 'Last 30 days' },
   { value: '90', label: 'Last 90 days' },
 ];
+
+// §2.1's decision: the envelope window is widened well beyond the body window, because an
+// envelope is ~1 KB and never evicts a message out of the offline list.
+const ENVELOPE_DAY_OPTIONS = [
+  { value: '30',   label: 'Last 30 days' },
+  { value: '90',   label: 'Last 90 days' },
+  { value: '180',  label: 'Last 6 months' },
+  { value: '365',  label: 'Last year' },
+  { value: '1095', label: 'Last 3 years' },
+];
+
+/** Promise-shaped Alert, so a destructive toggle can await the user's answer. */
+function confirmDestructive(title: string, message: string, confirmLabel: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    Alert.alert(title, message, [
+      { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+      { text: confirmLabel, style: 'destructive', onPress: () => resolve(true) },
+    ]);
+  });
+}
 
 const MAX_MB_OPTIONS = [
   { value: '25',  label: '25 MB' },
@@ -68,7 +89,51 @@ export function AboutDataSettings() {
   const offlineEnabled = useSettingsStore((s) => s.offlineCacheEnabled);
   const offlineDays = useSettingsStore((s) => s.offlineCacheDays);
   const offlineMaxMB = useSettingsStore((s) => s.offlineCacheMaxMB);
+  const engineV2 = useSettingsStore((s) => s.offlineSyncEngineV2);
+  const envelopeDays = useSettingsStore((s) => s.offlineEnvelopeDays);
+  const bodyDays = useSettingsStore((s) => s.offlineBodyDays);
   const updateSetting = useSettingsStore((s) => s.updateSetting);
+
+  // §8.4: disabling offline caching PURGES that account's store. The user's intent in
+  // switching it off is "don't keep my mail on this device", and once the store is
+  // encrypted a dormant database plus a live key in expo-secure-store is a liability with
+  // no benefit. Re-enabling therefore costs a full bootstrap, which is why this asks.
+  const onToggleOfflineCache = React.useCallback(
+    async (next: boolean) => {
+      if (next) {
+        updateSetting('offlineCacheEnabled', true);
+        return;
+      }
+      const confirmed = await confirmDestructive(
+        'Turn off offline mail?',
+        'This deletes the mail already downloaded to this device. Turning it back on will download it again.',
+        'Turn off',
+      );
+      if (!confirmed) return;
+      updateSetting('offlineCacheEnabled', false);
+      await purgeOfflineStores('feature-disabled');
+    },
+    [updateSetting],
+  );
+
+  // §14.1 is discard-and-rebuild, so flipping the engine is a purge either way rather than
+  // a migration: v1's cache and v2's store are different shapes with different provenance,
+  // and trusting records we cannot establish the provenance of is the thing the design
+  // rules out.
+  const onToggleEngine = React.useCallback(
+    async (next: boolean) => {
+      const confirmed = await confirmDestructive(
+        next ? 'Switch to the delta sync engine?' : 'Switch back to the old sync?',
+        'The mail already downloaded to this device will be deleted and downloaded again.',
+        'Switch',
+      );
+      if (!confirmed) return;
+      updateSetting('offlineSyncEngineV2', next);
+      await purgeOfflineStores('store-format-change');
+    },
+    [updateSetting],
+  );
+
   const queuedChanges = useOutboxStore((s) => s.entries.length);
   const flushOutbox = useOutboxStore((s) => s.flush);
   const cacheCount = useOfflineCacheStore((s) => s.totalCount());
@@ -143,19 +208,56 @@ export function AboutDataSettings() {
         >
           <ToggleSwitch
             checked={offlineEnabled}
-            onChange={(v) => updateSetting('offlineCacheEnabled', v)}
+            onChange={(v) => { void onToggleOfflineCache(v); }}
           />
         </SettingItem>
         <SettingItem
-          label="Window"
-          description="How far back to cache, measured by message receipt date."
+          label="Delta sync engine (beta)"
+          description="Keeps mail in step with the server incrementally instead of re-downloading a window. Switching this purges the on-device copy and rebuilds it."
         >
-          <Select
-            value={String(offlineDays)}
-            onChange={(v) => updateSetting('offlineCacheDays', Number(v))}
-            options={DAY_OPTIONS}
+          <ToggleSwitch
+            checked={engineV2}
+            onChange={(v) => { void onToggleEngine(v); }}
           />
         </SettingItem>
+        {engineV2 ? (
+          <>
+            {/* §2.1: envelopes are ~1 KB and are what the offline LIST needs, so this
+                window is deliberately much wider than the body window; the size cap
+                below governs bodies only. */}
+            <SettingItem
+              label="Message list history"
+              description="How far back to keep message headers. These are tiny, so this can be wide."
+            >
+              <Select
+                value={String(envelopeDays)}
+                onChange={(v) => updateSetting('offlineEnvelopeDays', Number(v))}
+                options={ENVELOPE_DAY_OPTIONS}
+              />
+            </SettingItem>
+            <SettingItem
+              label="Message bodies"
+              description="How far back to keep full message bodies for offline reading."
+            >
+              <Select
+                value={String(bodyDays)}
+                onChange={(v) => updateSetting('offlineBodyDays', Number(v))}
+                options={DAY_OPTIONS}
+              />
+            </SettingItem>
+          </>
+        ) : (
+          <SettingItem
+            label="Window"
+            description="How far back to cache, measured by message receipt date."
+          >
+            <Select
+              value={String(offlineDays)}
+              onChange={(v) => updateSetting('offlineCacheDays', Number(v))}
+              options={DAY_OPTIONS}
+            />
+          </SettingItem>
+        )}
         <SettingItem
           label="Maximum size"
           description="Oldest messages are removed when the cache grows past this."
