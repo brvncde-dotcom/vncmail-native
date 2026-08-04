@@ -1,0 +1,152 @@
+name: Android Emulator Smoke Test
+
+# Boots the app on a GitHub-hosted Android emulator and asserts it survives
+# startup — a regression gate for the vncmail-native fork before any
+# push/offline-sync work lands on top of it (see the VNCprodbuild skill,
+# Phase 2 step 2). This does NOT sign in or exercise JMAP; it only proves the
+# APK installs and the process doesn't crash within a short observation
+# window. android/ is the upstream project's own hand-maintained native
+# directory (see docs/ios-release.md's note contrasting it with the
+# gitignored, CNG-generated ios/) — this workflow builds it as-is and must
+# not run `expo prebuild` or otherwise regenerate/modify it.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "App.tsx"
+      - "index.ts"
+      - "app.config.js"
+      - "android/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/android-emulator-smoke.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "App.tsx"
+      - "index.ts"
+      - "app.config.js"
+      - "android/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/android-emulator-smoke.yml"
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      APP_PACKAGE: com.anonymous.bulwarkmobile
+      APP_ACTIVITY: com.anonymous.bulwarkmobile.MainActivity
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Cache native CMake build outputs
+        uses: actions/cache@v4
+        with:
+          path: |
+            android/app/.cxx
+            android/app/build/intermediates/cxx
+          key: cxx-smoke-${{ runner.os }}-${{ hashFiles('package-lock.json', 'android/build.gradle', 'android/app/build.gradle') }}
+          restore-keys: cxx-smoke-${{ runner.os }}-
+
+      - name: Build debug APK
+        working-directory: android
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Enable KVM (hardware acceleration for the emulator)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Cache AVD
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-smoke-api34
+
+      - name: Create AVD snapshot (cache miss only)
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          force-avd-creation: false
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: echo "AVD created and booted once to snapshot."
+
+      - name: Install APK, launch, and watch for crashes
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          force-avd-creation: false
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: |
+            set -euo pipefail
+            APK=$(find android/app/build/outputs/apk/debug -name '*.apk' | head -1)
+            echo "Installing $APK"
+            adb install -r "$APK"
+
+            adb logcat -c
+            adb shell am start -n "${APP_PACKAGE}/${APP_ACTIVITY}"
+
+            # Give the JS bundle time to load and the app to settle, then
+            # confirm the process is still alive and didn't hit a fatal crash.
+            sleep 20
+
+            if ! adb shell pidof "${APP_PACKAGE}" > /dev/null; then
+              echo "::error::${APP_PACKAGE} is not running after startup — treating as a crash."
+              adb logcat -d | tail -n 200
+              exit 1
+            fi
+
+            CRASH_LINES=$(adb logcat -d | grep -E "FATAL EXCEPTION|AndroidRuntime.*${APP_PACKAGE}" || true)
+            if [ -n "$CRASH_LINES" ]; then
+              echo "::error::Found a fatal crash in logcat for ${APP_PACKAGE}."
+              echo "$CRASH_LINES"
+              exit 1
+            fi
+
+            echo "App started and stayed alive for 20s with no fatal exception in logcat."
+
+      - name: Upload logcat on failure
+        if: failure()
+        run: adb logcat -d > logcat-smoke.txt || true
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: logcat-smoke
+          path: logcat-smoke.txt
+          if-no-files-found: ignore
