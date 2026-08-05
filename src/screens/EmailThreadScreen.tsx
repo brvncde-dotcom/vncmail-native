@@ -16,6 +16,7 @@ import { spacing, radius, typography, componentSizes, type ThemePalette } from '
 import { useColors } from '../theme/colors';
 import EmailBodyView from '../components/EmailBodyView';
 import { CalendarInvitationBanner } from '../components/email/CalendarInvitationBanner';
+import { SmimeBanner } from '../components/email/SmimeBanner';
 import SenderAvatar from '../components/SenderAvatar';
 import { MoveSheet } from '../components/MoveSheet';
 import { useEmailStore } from '../stores/email-store';
@@ -821,6 +822,9 @@ function EmailPane({
 
       {/* Attachments chips (full-width below header) */}
       {attachmentPosition === 'below-header' && renderAttachments()}
+
+      {/* S/MIME signature / encryption status (also drives the body view) */}
+      <SmimeBanner email={email} jmapAccountId={jmapAccountId} />
 
       {/* Calendar invitation (auto-detected .ics) */}
       <CalendarInvitationBanner email={email} />

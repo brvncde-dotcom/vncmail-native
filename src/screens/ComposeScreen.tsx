@@ -9,7 +9,7 @@ import {
   X, Send, Paperclip, ChevronDown, Bold, Italic, Underline, Strikethrough,
   List, ListOrdered, Link2, Link2Off, Image as ImageIcon, Quote,
   Heading1, Heading2, AlignLeft, AlignCenter, AlignRight, RemoveFormatting,
-  Undo2, Redo2, FileText, Clock, Check,
+  Undo2, Redo2, FileText, Clock, Check, ShieldCheck, Lock,
 } from 'lucide-react-native';
 import DateTimePicker, { type DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import * as ImagePicker from 'expo-image-picker';
@@ -35,11 +35,13 @@ import {
   matchesContactSearch,
 } from '../lib/contact-utils';
 import { getIdentities } from '../api/identity';
-import { sendEmail, type OutgoingAttachment } from '../api/email';
+import { sendEmail, sendRawEmail, type OutgoingAttachment } from '../api/email';
 import { jmapClient } from '../api/jmap-client';
 import { uploadBlob } from '../api/blob';
 import { buildInitialHtml, htmlToPlainText, rewriteInlineImages } from '../lib/compose-html';
 import { stripDangerousTags } from '../lib/email-html';
+import { buildComposeSmime, smimeComposeCapabilities } from '../lib/smime/compose';
+import { useSmimeStore } from '../stores/smime-store';
 import type { EmailAddress, Identity, ContactCard } from '../api/types';
 import type { RootStackParamList } from '../navigation/types';
 
@@ -287,6 +289,7 @@ export default function ComposeScreen({ route, navigation }: Props) {
   const attachmentReminderEnabled = useSettingsStore((s) => s.attachmentReminderEnabled);
   const attachmentReminderKeywords = useSettingsStore((s) => s.attachmentReminderKeywords);
   const sendDelaySeconds = useSettingsStore((s) => s.sendDelaySeconds);
+  const smimeDefaultEncrypt = useSettingsStore((s) => s.smimeDefaultEncrypt);
 
   const initialTo = React.useMemo<Recipient[]>(() => {
     if (!replyTo) {
@@ -357,6 +360,22 @@ export default function ComposeScreen({ route, navigation }: Props) {
     ul: false, ol: false, blockquote: false, h1: false, h2: false,
     alignLeft: false, alignCenter: false, alignRight: false, link: false,
   });
+
+  // S/MIME per-message toggles. Encryption starts from the `Encrypt by default`
+  // setting; signing is opt-in per message so an unlocked key is never used
+  // without the user asking.
+  const [smimeSign, setSmimeSign] = React.useState(false);
+  const [smimeEncrypt, setSmimeEncrypt] = React.useState(false);
+  const [smimeCaps, setSmimeCaps] = React.useState<{
+    canSign: boolean; signReason?: string; canEncrypt: boolean; encryptReason?: string;
+  }>({ canSign: false, canEncrypt: false });
+  const smimeHydrated = useSmimeStore((s) => s.hydrated);
+  const hydrateSmime = useSmimeStore((s) => s.hydrate);
+  const smimeKeys = useSmimeStore((s) => s.keys);
+
+  // The `Encrypt by default` setting is applied once, the first time encryption
+  // becomes possible — after that the toggle is the user's to control.
+  const encryptDefaultAppliedRef = React.useRef(false);
 
   const editorRef = React.useRef<RichTextEditorHandle>(null);
   const isPickingSuggestion = React.useRef(false);
@@ -499,6 +518,45 @@ export default function ComposeScreen({ route, navigation }: Props) {
   };
 
   const { finalTo, finalCc } = commitTyped();
+
+  // ── S/MIME availability ────────────────────────────────────────────
+  // Recomputed whenever the sender, the recipients or the keystore changes, so
+  // the toggles can explain *why* an option is unavailable instead of silently
+  // failing at send time.
+  const recipientKey = React.useMemo(
+    () => [...finalTo, ...finalCc].map((r) => r.email.trim().toLowerCase()).filter(Boolean).sort().join(','),
+    [finalTo, finalCc],
+  );
+  const smimeFromAddress = primaryIdentity?.email;
+
+  React.useEffect(() => {
+    if (!smimeHydrated) void hydrateSmime();
+  }, [smimeHydrated, hydrateSmime]);
+
+  React.useEffect(() => {
+    if (!smimeFromAddress || !smimeHydrated) return;
+    let cancelled = false;
+    void (async () => {
+      const recipients = recipientKey ? recipientKey.split(',').map((email) => ({ email })) : [];
+      const caps = await smimeComposeCapabilities(smimeFromAddress, recipients).catch(() => ({
+        canSign: false, canEncrypt: false,
+      }));
+      if (cancelled) return;
+      setSmimeCaps(caps);
+      // Drop a toggle that has become impossible (a recipient without a
+      // certificate was added, the key was locked from Settings) rather than
+      // letting Send fail.
+      if (!caps.canSign) setSmimeSign(false);
+      if (!caps.canEncrypt) {
+        setSmimeEncrypt(false);
+      } else if (smimeDefaultEncrypt && !encryptDefaultAppliedRef.current) {
+        encryptDefaultAppliedRef.current = true;
+        setSmimeEncrypt(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [smimeFromAddress, recipientKey, smimeHydrated, smimeKeys, smimeDefaultEncrypt]);
+
   const hasUploadInFlight = attachments.some((a) => a.uploading);
   const hasUploadError = attachments.some((a) => !!a.error);
   const hasValidRecipients = finalTo.every((r) => EMAIL_RE.test(r.email)) && finalTo.length > 0;
@@ -938,6 +996,66 @@ export default function ComposeScreen({ route, navigation }: Props) {
 
       const outgoing = [...inlineFromBody, ...fileAttachments];
 
+      // ── S/MIME path ──────────────────────────────────────────────────
+      // A signed or encrypted message has to be assembled locally: letting the
+      // server build the MIME from a body would re-encode the CMS blob and
+      // invalidate the signature. So it goes out as a raw RFC 822 upload.
+      if (smimeSign || smimeEncrypt) {
+        const smimeAttachments = [
+          ...usedCids
+            .map((cid) => inlineRegistryRef.current.get(cid))
+            .filter((e): e is AttachmentEntry => !!e && !e.error)
+            .map((e) => ({
+              uri: e.uri, name: e.name, type: e.type,
+              disposition: 'inline' as const, cid: e.cid,
+            })),
+          ...attachments
+            .filter((a) => !a.inline && !a.error)
+            .map((a) => ({
+              uri: a.uri, name: a.name, type: a.type,
+              disposition: 'attachment' as const,
+            })),
+        ];
+
+        const outcome = await buildComposeSmime({
+          sign: smimeSign,
+          encrypt: smimeEncrypt,
+          from: from[0],
+          to: finalTo.map((r) => ({ name: r.name || undefined, email: r.email })),
+          cc: finalCc.length
+            ? finalCc.map((r) => ({ name: r.name || undefined, email: r.email }))
+            : undefined,
+          subject,
+          html: plainTextMode ? undefined : finalHtml,
+          text: finalText,
+          attachments: smimeAttachments,
+          inReplyTo: replyTo?.inReplyTo,
+          references: replyTo?.references,
+        });
+
+        const smimeResult = await sendRawEmail({
+          raw: outcome.raw,
+          identityId: primaryIdentity.id,
+          sentMailboxId: sentMailbox.id,
+          from: from[0],
+          recipients: outcome.recipients,
+          holdForSeconds,
+        });
+
+        if (scheduledAt && smimeResult.scheduled) {
+          const when = smimeResult.sendAt ? new Date(smimeResult.sendAt) : scheduledAt;
+          Alert.alert(
+            t('email_composer.scheduled_title', 'Scheduled'),
+            t('email_composer.scheduled_body', 'Your message will be sent at {time}.').replace(
+              '{time}',
+              when.toLocaleString(),
+            ),
+          );
+        }
+        navigation.goBack();
+        return;
+      }
+
       const result = await sendEmail(
         {
           from,
@@ -982,6 +1100,29 @@ export default function ComposeScreen({ route, navigation }: Props) {
     }
   };
 
+  // Tapping an unavailable S/MIME toggle explains what is missing rather than
+  // doing nothing.
+  const onToggleSmime = (which: 'sign' | 'encrypt') => {
+    if (which === 'sign') {
+      if (!smimeCaps.canSign) {
+        Alert.alert('Cannot sign', smimeCaps.signReason ?? 'Signing is not available.');
+        return;
+      }
+      setSmimeSign((v) => !v);
+      return;
+    }
+    if (!smimeCaps.canEncrypt) {
+      Alert.alert('Cannot encrypt', smimeCaps.encryptReason ?? 'Encryption is not available.');
+      return;
+    }
+    setSmimeEncrypt((v) => {
+      // Encryption without a signature leaves the recipient no way to know who
+      // sent it, so turning encryption on turns signing on too when possible.
+      if (!v && smimeCaps.canSign) setSmimeSign(true);
+      return !v;
+    });
+  };
+
   const titleKey =
     mode === 'forward' ? 'email_composer.forward'
     : mode === 'replyAll' ? 'email_composer.reply_all'
@@ -998,6 +1139,28 @@ export default function ComposeScreen({ route, navigation }: Props) {
           {t(titleKey, mode === 'forward' ? 'Forward' : mode === 'replyAll' ? 'Reply All' : replyTo ? 'Reply' : 'New Message')}
         </Text>
         <View style={styles.headerRight}>
+          <Pressable
+            onPress={() => onToggleSmime('sign')}
+            style={styles.headerBtn}
+            hitSlop={8}
+            testID="compose-smime-sign"
+          >
+            <ShieldCheck
+              size={20}
+              color={smimeSign ? c.primary : smimeCaps.canSign ? c.text : c.textMuted}
+            />
+          </Pressable>
+          <Pressable
+            onPress={() => onToggleSmime('encrypt')}
+            style={styles.headerBtn}
+            hitSlop={8}
+            testID="compose-smime-encrypt"
+          >
+            <Lock
+              size={20}
+              color={smimeEncrypt ? c.primary : smimeCaps.canEncrypt ? c.text : c.textMuted}
+            />
+          </Pressable>
           <Pressable
             onPress={() => { void pickAttachment(); }}
             style={styles.headerBtn}

@@ -6,6 +6,8 @@ import type { Email } from '../api/types';
 import { wrapEmailHtml, wrapPlainTextEmail, plainTextToSafeHtml, extractCidRefs, hasRemoteContent, hasMeaningfulHtmlBody, hasNativeDarkMode } from '../lib/email-html';
 import { jmapClient } from '../api/jmap-client';
 import { useSettingsStore } from '../stores/settings-store';
+import { useSmimeStore } from '../stores/smime-store';
+import { detectSmime } from '../lib/smime/detect';
 import { useContactsStore } from '../stores/contacts-store';
 import { spacing, typography, type ThemePalette } from '../theme/tokens';
 import { useColors, useResolvedTheme } from '../theme/colors';
@@ -501,8 +503,20 @@ export default function EmailBodyView({
   // emails on a light surface even while the rest of the app is dark.
   const renderAsDark = !emailAlwaysLightMode && resolvedTheme === 'dark';
 
-  const html = React.useMemo(() => extractHtmlBody(email), [email]);
-  const text = React.useMemo(() => extractTextBody(email), [email]);
+  // S/MIME: for a signed or encrypted message the JMAP body is the CMS blob, not
+  // anything a reader wants to see. The recovered inner body replaces it once
+  // SmimeBanner has processed the message. `suppressHtml` is the EFAIL guard —
+  // for content no cipher or signature vouches for, the HTML is deliberately
+  // *not* rendered as a document; it is shown as inert text with no remote loads.
+  const isSmime = React.useMemo(() => detectSmime(email) !== 'none', [email]);
+  const smime = useSmimeStore((s) => s.results[email.id]);
+
+  const jmapHtml = React.useMemo(() => extractHtmlBody(email), [email]);
+  const jmapText = React.useMemo(() => extractTextBody(email), [email]);
+  const html = isSmime ? (smime?.suppressHtml ? null : smime?.html ?? null) : jmapHtml;
+  const text = isSmime
+    ? (smime?.suppressHtml ? (smime.text ?? smime.html ?? null) : smime?.text ?? null)
+    : jmapText;
   // Prefer textBody when the HTML is a minimal auto-generated wrapper that would
   // collapse newlines (mirrors webmail's hasMeaningfulHtmlBody fallback).
   const rawHtml = React.useMemo(
@@ -543,7 +557,27 @@ export default function EmailBodyView({
     setCidMap({});
   }, [email.id]);
 
+  // Inline images inside a signed/encrypted message never existed as JMAP blobs —
+  // they came out of the CMS with the rest of the body — so their cid: refs have
+  // to be satisfied from the decrypted parts held in memory.
   React.useEffect(() => {
+    if (!isSmime || !rawHtml || !smime?.attachments.length) return;
+    const refs = extractCidRefs(rawHtml);
+    if (refs.length === 0) return;
+    const next: Record<string, string> = {};
+    for (const att of smime.attachments) {
+      if (!att.cid || !refs.includes(att.cid)) continue;
+      if (att.bytes.byteLength > MAX_INLINE_IMAGE_BYTES) continue;
+      const b64 = arrayBufferToBase64(
+        att.bytes.buffer.slice(att.bytes.byteOffset, att.bytes.byteOffset + att.bytes.byteLength) as ArrayBuffer,
+      );
+      next[att.cid] = `data:${att.contentType || 'application/octet-stream'};base64,${b64}`;
+    }
+    if (Object.keys(next).length > 0) setCidMap((prev) => ({ ...prev, ...next }));
+  }, [isSmime, rawHtml, smime]);
+
+  React.useEffect(() => {
+    if (isSmime) return;
     if (!rawHtml || !email.attachments?.length) return;
     const refs = extractCidRefs(rawHtml);
     if (refs.length === 0) return;
@@ -581,7 +615,7 @@ export default function EmailBodyView({
       }
     })();
     return () => { cancelled = true; };
-  }, [rawHtml, email.attachments, jmapAccountId]);
+  }, [isSmime, rawHtml, email.attachments, jmapAccountId]);
 
   const source = React.useMemo(() => {
     if (rawHtml) {
@@ -593,18 +627,21 @@ export default function EmailBodyView({
         }),
       };
     }
-    const fallbackText = text ?? email.preview ?? '';
+    // While an S/MIME message is still being verified/decrypted, showing the
+    // JMAP `preview` would leak the CMS base64 into the reader.
+    const fallbackText = text ?? (isSmime ? '' : email.preview ?? '');
     if (!fallbackText) {
+      const placeholder = isSmime && !smime
+        ? '<em style="color:#71717a">Decrypting…</em>'
+        : '<em style="color:#71717a">(empty message)</em>';
       return {
-        html: wrapEmailHtml('<em style="color:#71717a">(empty message)</em>', {
-          isDark: renderAsDark,
-        }),
+        html: wrapEmailHtml(placeholder, { isDark: renderAsDark }),
       };
     }
     return {
       html: wrapPlainTextEmail(plainTextToSafeHtml(fallbackText), { isDark: renderAsDark }),
     };
-  }, [rawHtml, text, email.preview, shouldBlock, cidMap, renderAsDark]);
+  }, [rawHtml, text, email.preview, shouldBlock, cidMap, renderAsDark, isSmime, smime]);
 
   // Inversion is applied for HTML bodies in dark mode unless the email ships its
   // own dark-mode CSS. When it's on, prepend the DOM re-inversion pass (emoji +

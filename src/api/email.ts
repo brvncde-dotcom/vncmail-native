@@ -1,4 +1,5 @@
 import { jmapClient } from './jmap-client';
+import { uploadBytes } from './blob';
 import { CAPABILITIES } from './types';
 import type { Email, EmailAddress, JMAPMethodCall, Mailbox, Thread } from './types';
 import { toWildcardQuery } from '../lib/search-utils';
@@ -896,6 +897,87 @@ export async function sendEmail(
 
   return {
     scheduled: !!(holdForSeconds && holdForSeconds > 0),
+    sendAt,
+    emailId,
+    emailSubmissionId,
+  };
+}
+
+/**
+ * Send an already-assembled raw RFC 822 message.
+ *
+ * S/MIME cannot go through `sendEmail`: that path hands JMAP a body and lets the
+ * *server* build the MIME, which would re-encode or re-wrap the CMS blob and in
+ * either case break the signature. So the message is built locally, uploaded as a
+ * blob, imported into Sent with `Email/import`, and submitted by id.
+ *
+ * The envelope is always explicit. A raw S/MIME message deliberately carries no
+ * Bcc header (it must not travel with the message), so leaving the envelope to
+ * the server would silently drop every blind recipient.
+ */
+export async function sendRawEmail(options: {
+  raw: Uint8Array;
+  identityId: string;
+  sentMailboxId: string;
+  from: EmailAddress;
+  recipients: EmailAddress[];
+  holdForSeconds?: number;
+}): Promise<SendEmailResult> {
+  const accountId = jmapClient.accountId;
+
+  const { blobId } = await uploadBytes(options.raw, 'message/rfc822');
+  const emailId = await importEmailBlob(blobId, options.sentMailboxId, { $seen: true });
+
+  const rcptTo = options.recipients
+    .map((r) => r.email.trim())
+    .filter(Boolean)
+    .map((email) => ({ email }));
+  if (rcptTo.length === 0) throw new Error('No recipients to send to');
+
+  const mailFrom: Record<string, unknown> = { email: options.from.email };
+  if (options.holdForSeconds && options.holdForSeconds > 0) {
+    mailFrom.parameters = { HOLDFOR: String(Math.ceil(options.holdForSeconds)) };
+  }
+
+  const res = await jmapClient.request(
+    [
+      ['EmailSubmission/set', {
+        accountId,
+        create: {
+          'sub-1': {
+            emailId,
+            identityId: options.identityId,
+            envelope: { mailFrom, rcptTo },
+          },
+        },
+      }, '0'],
+    ],
+    [CAPABILITIES.CORE, CAPABILITIES.MAIL, CAPABILITIES.SUBMISSION],
+  );
+
+  let emailSubmissionId: string | undefined;
+  let sendAt: string | undefined;
+  for (const [methodName, result] of res.methodResponses) {
+    if (methodName.endsWith('/error')) {
+      throw new Error((result as { description?: string }).description ?? 'Send failed');
+    }
+    if (methodName === 'EmailSubmission/set') {
+      const notCreated = (result as {
+        notCreated?: Record<string, { description?: string; type?: string }>;
+      }).notCreated?.['sub-1'];
+      if (notCreated) {
+        throw new Error(notCreated.description ?? notCreated.type ?? 'Failed to submit message');
+      }
+      const created = (result as {
+        created?: Record<string, { id?: string; sendAt?: string }>;
+      }).created?.['sub-1'];
+      emailSubmissionId = created?.id;
+      sendAt = created?.sendAt;
+    }
+  }
+
+  return {
+    scheduled: !!(options.holdForSeconds && options.holdForSeconds > 0),
     sendAt,
     emailId,
     emailSubmissionId,

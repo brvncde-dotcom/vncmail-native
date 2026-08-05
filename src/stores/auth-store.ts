@@ -6,6 +6,7 @@ import { useEmailStore } from './email-store';
 import { useContactsStore } from './contacts-store';
 import { useCalendarStore } from './calendar-store';
 import { useFilterStore } from './filter-store';
+import { useSmimeStore } from './smime-store';
 import { generateAccountId } from '../lib/account-utils';
 import { runWebmailHandoff, redeemPairingCode, HandoffCancelledError, type HandoffResult } from '../lib/oauth';
 import {
@@ -58,6 +59,10 @@ function clearAllFeatureStores(): void {
   useContactsStore.getState().reset();
   useCalendarStore.getState().reset();
   useFilterStore.getState().clearState();
+  // Unlocked S/MIME private keys live only in memory. Dropping them here means
+  // a signed-out session cannot decrypt the previous user's mail, and a switched-
+  // to account cannot borrow the previous account's keys.
+  useSmimeStore.getState().lockEverything();
 }
 
 // Drop the named account from the email cache, then reset the (per-session,
@@ -76,6 +81,10 @@ function clearAccountFeatureStores(accountId: string | null): void {
   useContactsStore.getState().reset();
   useCalendarStore.getState().reset();
   useFilterStore.getState().clearState();
+  // Unlocked S/MIME private keys live only in memory. Dropping them here means
+  // a signed-out session cannot decrypt the previous user's mail, and a switched-
+  // to account cannot borrow the previous account's keys.
+  useSmimeStore.getState().lockEverything();
 }
 
 function refetchFeatureStores(): void {

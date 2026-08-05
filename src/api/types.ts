@@ -51,6 +51,9 @@ export interface BodyPart {
   disposition?: string;
   size?: number;
   cid?: string;
+  // JMAP returns the full part tree under `bodyStructure`; the nested parts are
+  // what S/MIME detection walks to spot a multipart/signed wrapper.
+  subParts?: BodyPart[];
 }
 
 export interface Attachment {

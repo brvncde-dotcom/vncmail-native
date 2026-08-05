@@ -72,3 +72,34 @@ vi.mock('expo-web-browser', () => ({
   openAuthSessionAsync: vi.fn(async () => ({ type: 'cancel' as const })),
   maybeCompleteAuthSession: vi.fn(),
 }));
+
+// Metro defines `__DEV__`; a plain node run does not. expo-modules-core reads it
+// at module load, so anything importing an Expo native module (expo-file-system
+// via api/blob, expo-crypto via the S/MIME layer) crashes without it.
+(globalThis as { __DEV__?: boolean }).__DEV__ = false;
+
+// expo-file-system's `File` is only used for on-disk reads, which no unit test
+// exercises; the S/MIME tests build their bytes in memory.
+vi.mock('expo-file-system', () => ({
+  File: class {
+    constructor(public uri: string) {}
+    bytes(): Promise<Uint8Array> {
+      return Promise.resolve(new Uint8Array(0));
+    }
+  },
+}));
+
+// The S/MIME layer prefers expo-crypto for its CSPRNG. In node, hand it the
+// real one so the crypto tests exercise a genuine random source rather than a
+// deterministic stub.
+vi.mock('expo-crypto', async () => {
+  const nodeCrypto = await import('node:crypto');
+  return {
+    getRandomValues: <T extends Uint8Array>(target: T): T => {
+      const bytes = nodeCrypto.randomBytes(target.length);
+      target.set(bytes);
+      return target;
+    },
+    getRandomBytes: (count: number) => new Uint8Array(nodeCrypto.randomBytes(count)),
+  };
+});
