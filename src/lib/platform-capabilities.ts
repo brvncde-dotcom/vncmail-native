@@ -24,3 +24,21 @@ export const supportsSideloadUpdates = Platform.OS === 'android';
  * feature is hidden on web rather than reachable but silently broken there.
  */
 export const supportsAiAssistant = Platform.OS !== 'web';
+
+/**
+ * The `local` provider class (a loopback Ollama-compatible runtime) needs a
+ * host process reachable on 127.0.0.1 — see `docs/AI-ASSISTANT-CONCEPT.md`
+ * §1.1 and §3's platform matrix. This repo has no Electron shell (that's
+ * `vncmail-plus`), so the expression below always evaluates to `false` here;
+ * it's written to match the doc's canonical form (`Platform.OS === 'web' ||
+ * isElectron`) so the same flag ports unchanged to the web/Electron client.
+ *
+ * A phone has neither the runtime nor the RAM, and critically cannot reach a
+ * developer's own laptop loopback address from real hardware — the prior
+ * `AiAssistantSettings` prototype offered this option on iOS/Android anyway,
+ * reachable only from the Simulator on the same Mac as Ollama. That is
+ * exactly the "hidden feature that's really broken" pattern this module
+ * exists to prevent (see the FTS5 comment above) — mobile deliberately gets
+ * no `local` transport or UI at all.
+ */
+export const supportsLocalLlm = false;

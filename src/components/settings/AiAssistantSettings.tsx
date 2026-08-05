@@ -14,6 +14,7 @@ import { spacing, radius, typography, type ThemePalette } from '../../theme/toke
 import { useColors } from '../../theme/colors';
 import { useSettingsStore } from '../../stores/settings-store';
 import { getAiApiKey, setAiApiKey } from '../../lib/ai-key-store';
+import { supportsLocalLlm } from '../../lib/platform-capabilities';
 import {
   askLocalMail,
   listLocalModels,
@@ -22,9 +23,12 @@ import {
 } from '../../api/ai';
 
 /**
- * Prototype scope only — see the plan this shipped with. `local` (loopback
- * Ollama-compatible runtime) and `public` (BYOK, OpenAI-compatible) exist;
- * `server` doesn't, because the VNC-hosted proxy it needs isn't built yet.
+ * Prototype scope only — see the plan this shipped with. `public` (BYOK,
+ * OpenAI-compatible) is the only class offered; `server` doesn't exist
+ * because the VNC-hosted proxy it needs isn't built yet, and `local` is
+ * never offered on this platform (see `supportsLocalLlm` — a phone can't
+ * reach a developer's own laptop loopback address, per
+ * `docs/AI-ASSISTANT-CONCEPT.md` §1.1/§3).
  */
 export function AiAssistantSettings() {
   const c = useColors();
@@ -35,7 +39,11 @@ export function AiAssistantSettings() {
   const update = useSettingsStore((s) => s.updateSetting);
 
   const aiEnabled = useSettingsStore((s) => s.aiEnabled);
-  const provider = useSettingsStore((s) => s.aiActiveProvider);
+  const storedProvider = useSettingsStore((s) => s.aiActiveProvider);
+  // A device that persisted `local` before this platform gate existed (or
+  // synced settings from one that could reach it) falls back to unset here,
+  // never to a transport this platform doesn't ship.
+  const provider = !supportsLocalLlm && storedProvider === 'local' ? null : storedProvider;
   const localBaseUrl = useSettingsStore((s) => s.aiLocalBaseUrl);
   const localModel = useSettingsStore((s) => s.aiLocalModel);
   const publicBaseUrl = useSettingsStore((s) => s.aiPublicBaseUrl);
@@ -143,13 +151,13 @@ export function AiAssistantSettings() {
               value={provider ?? ''}
               onChange={(v) => update('aiActiveProvider', v as 'local' | 'public')}
               options={[
-                { value: 'local', label: 'Local (Ollama)' },
+                ...(supportsLocalLlm ? [{ value: 'local', label: 'Local (Ollama)' }] : []),
                 { value: 'public', label: 'Public (your API key)' },
               ]}
             />
           </SettingsSection>
 
-          {provider === 'local' && (
+          {provider === 'local' && supportsLocalLlm && (
             <SettingsSection
               title="Local runtime"
               description="Only reachable if this device can hit 127.0.0.1 — e.g. the iOS Simulator running on the same Mac as Ollama. A real phone cannot reach your laptop's loopback address."
