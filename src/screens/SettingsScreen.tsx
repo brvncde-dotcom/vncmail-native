@@ -6,7 +6,7 @@ import {
   Palette, User, Shield, UserPen, Palmtree, Calendar,
   Filter, FileText, FolderOpen, Tags, HardDrive,
   BookUser, KeyRound, PanelLeftClose, Bell, Puzzle, RefreshCw,
-  LayoutGrid, BookOpen, PenLine, EyeOff, Languages, Info, Bug, Download,
+  LayoutGrid, BookOpen, PenLine, EyeOff, Languages, Info, Bug, Download, Sparkles,
   type LucideIcon,
 } from 'lucide-react-native';
 import { spacing, radius, typography, componentSizes, type ThemePalette } from '../theme/tokens';
@@ -36,9 +36,10 @@ import { LanguageSettings } from '../components/settings/LanguageSettings';
 import { ComposingSettings } from '../components/settings/ComposingSettings';
 import { LayoutSettings } from '../components/settings/LayoutSettings';
 import { DownloadsSettings } from '../components/settings/DownloadsSettings';
+import { AiAssistantSettings } from '../components/settings/AiAssistantSettings';
 import { useLocaleStore } from '../stores/locale-store';
 import { useHasCalendar, useHasContacts, useHasFiles } from '../lib/capabilities';
-import { supportsSideloadUpdates } from '../lib/platform-capabilities';
+import { supportsSideloadUpdates, supportsAiAssistant } from '../lib/platform-capabilities';
 
 type Tab =
   | 'account' | 'language' | 'notifications'
@@ -47,7 +48,7 @@ type Tab =
   | 'filters' | 'templates' | 'folders' | 'keywords' | 'downloads'
   | 'security' | 'encryption' | 'content_senders'
   | 'calendar' | 'contacts' | 'files' | 'sidebar_apps'
-  | 'about_data' | 'themes' | 'plugins' | 'updates' | 'debug';
+  | 'about_data' | 'themes' | 'plugins' | 'updates' | 'ai' | 'debug';
 
 type TabGroup = 'general' | 'appearance' | 'mail' | 'privacy' | 'apps' | 'advanced';
 
@@ -108,6 +109,7 @@ const TABS: TabDef[] = [
   { id: 'themes',          label: 'Themes',             icon: Palette,        group: 'advanced',   experimental: true, implemented: true  },
   { id: 'plugins',         label: 'Plugins',            icon: Puzzle,         group: 'advanced',   experimental: true, implemented: true  },
   { id: 'updates',         label: 'Updates',            icon: RefreshCw,      group: 'advanced',   implemented: true  },
+  { id: 'ai',              label: 'AI Assistant',       icon: Sparkles,       group: 'advanced',   experimental: true, implemented: true  },
   { id: 'debug',           label: 'Debug',              icon: Bug,            group: 'advanced',   implemented: false },
 ];
 
@@ -137,13 +139,19 @@ const TAB_COMPONENTS: Partial<Record<Tab, React.ComponentType<any>>> = {
   themes: ThemesSettings,
   plugins: PluginsSettings,
   updates: UpdatesSettings,
+  ai: AiAssistantSettings,
 };
 
 // Tabs whose feature does not exist on this platform never appear in the list.
 // The "Updates" pane drives the sideload installer, which is Android-only - the
-// current version and build are still shown under "About & Data".
+// current version and build are still shown under "About & Data". "AI Assistant"
+// rests entirely on the local FTS5 index (sync/fts.ts), which the web SQLite
+// backend cannot provide (no FTS5 module in that build) - so it's absent there
+// rather than present-but-broken.
 const AVAILABLE_TABS: TabDef[] = TABS.filter(
-  (t) => t.id !== 'updates' || supportsSideloadUpdates,
+  (t) =>
+    (t.id !== 'updates' || supportsSideloadUpdates) &&
+    (t.id !== 'ai' || supportsAiAssistant),
 );
 
 function groupTabs() {

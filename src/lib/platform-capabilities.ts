@@ -14,3 +14,13 @@ import { Platform } from 'react-native';
  * check) is hidden when this is false.
  */
 export const supportsSideloadUpdates = Platform.OS === 'android';
+
+/**
+ * The AI assistant's retrieval leg (`sync/fts.ts`) is SQLite FTS5-only. Expo's
+ * web SQLite backend (`wa-sqlite`, a WASM build) has no FTS5 module compiled
+ * in at all — confirmed by inspecting the shipped `.wasm` directly, not
+ * assumed. Native iOS/Android builds do have it (see
+ * `sync/__tests__/sqlite-driver.test.ts`'s packaging evidence). So the whole
+ * feature is hidden on web rather than reachable but silently broken there.
+ */
+export const supportsAiAssistant = Platform.OS !== 'web';

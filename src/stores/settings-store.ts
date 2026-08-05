@@ -238,6 +238,26 @@ interface PersistedSettings {
   // `offlineCacheDays` remains the v1 knob; these two are v2's.
   offlineEnvelopeDays: number;
   offlineBodyDays: number;
+
+  // ── AI assistant (docs/AI-ASSISTANT-CONCEPT.md) — prototype scope ──
+  //
+  // Only `local` (a loopback Ollama-compatible runtime) and `public` (BYOK, an
+  // OpenAI-compatible endpoint) exist here. `server` isn't: it needs the VNC-hosted
+  // proxy from the concept doc, which doesn't exist yet. The API key itself never
+  // lives here — see `src/lib/ai-key-store.ts` (SecureStore, not AsyncStorage).
+  aiEnabled: boolean;
+  aiActiveProvider: 'local' | 'public' | null;
+  aiLocalBaseUrl: string;
+  aiLocalModel: string;
+  aiPublicBaseUrl: string;
+  aiPublicModel: string;
+  // Local-only acknowledgement that a public call leaves the organisation. The
+  // concept doc's §7.3 design (versioned, server-recorded, enforced at the proxy)
+  // needs a backend that doesn't exist yet — this is a real but lesser stand-in,
+  // not the finished feature.
+  aiPublicConsentAccepted: boolean;
+  // Retrieval floor: how far back `ftsSearch` looks for context, in days.
+  aiScopeDays: number;
 }
 
 const DEFAULT_PERSISTED: PersistedSettings = {
@@ -340,6 +360,15 @@ const DEFAULT_PERSISTED: PersistedSettings = {
   // actually governs.
   offlineEnvelopeDays: 365,
   offlineBodyDays: 30,
+
+  aiEnabled: false,
+  aiActiveProvider: null,
+  aiLocalBaseUrl: 'http://127.0.0.1:11434',
+  aiLocalModel: '',
+  aiPublicBaseUrl: 'https://openrouter.ai/api/v1',
+  aiPublicModel: '',
+  aiPublicConsentAccepted: false,
+  aiScopeDays: 90,
 };
 
 export interface SettingsState extends PersistedSettings {
