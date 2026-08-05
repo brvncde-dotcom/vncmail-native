@@ -1,12 +1,16 @@
 // Live banner that mirrors the UpdateBanner's footprint, surfaced while the
 // offline mail sync is running. Hidden once the sync settles to idle/done.
+//
+// Which engine it is reporting on is decided in `useOfflineSyncView()`, not here — that
+// hook is the single v1/v2 branch point, added after the Settings screen was found NOT to
+// branch while this component did.
 
 import React from 'react';
 import { View, Text, StyleSheet, Pressable } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CloudDownload, X } from 'lucide-react-native';
-import { useOfflineCacheStore } from '../stores/offline-cache-store';
 import { useUpdatesStore } from '../stores/updates-store';
+import { useOfflineSyncView } from '../sync/offline-hooks';
 import { formatBytes } from '../lib/offline-sync';
 import { spacing, radius, typography, type ThemePalette } from '../theme/tokens';
 import { useColors } from '../theme/colors';
@@ -15,9 +19,11 @@ export function OfflineCacheBanner(): React.ReactElement | null {
   const c = useColors();
   const styles = React.useMemo(() => makeStyles(c), [c]);
   const insets = useSafeAreaInsets();
-  const sync = useOfflineCacheStore((s) => s.sync);
-  const requestAbort = useOfflineCacheStore((s) => s.requestAbort);
-  const resetSync = useOfflineCacheStore((s) => s.resetSync);
+  const sync = useOfflineSyncView();
+  const engineV2 = sync.engineActive;
+  const requestAbort = sync.cancel;
+  const resetSync = sync.dismiss;
+
   // When UpdateBanner is stacked above us it already absorbs the status-bar
   // inset, so we only add it when we're the topmost banner.
   const cachedLatest = useUpdatesStore((s) => s.cachedLatest);
@@ -43,8 +49,9 @@ export function OfflineCacheBanner(): React.ReactElement | null {
 
   if (sync.phase === 'idle') return null;
 
-  const pct =
-    sync.total > 0
+  const pct = sync.indeterminate
+    ? 100
+    : sync.total > 0
       ? Math.min(100, Math.round((sync.completed / sync.total) * 100))
       : sync.phase === 'done' ? 100 : 0;
 
@@ -53,17 +60,21 @@ export function OfflineCacheBanner(): React.ReactElement | null {
   switch (sync.phase) {
     case 'scanning':
       title = 'Syncing offline mail';
-      subtitle = 'Scanning recent messages…';
+      subtitle = sync.message ?? 'Scanning recent messages…';
       break;
     case 'fetching':
       title = 'Syncing offline mail';
-      subtitle = `${sync.completed}/${sync.total} • ${formatBytes(sync.bytes)}`;
+      subtitle = engineV2
+        ? (sync.message ?? 'Checking for changes…')
+        : `${sync.completed}/${sync.total} • ${formatBytes(sync.bytes)}`;
       break;
     case 'done':
       title = 'Offline mail ready';
-      subtitle = sync.fetched > 0
-        ? `${sync.fetched} new message${sync.fetched === 1 ? '' : 's'} cached • ${formatBytes(sync.bytes)}`
-        : 'Already up to date';
+      subtitle = engineV2
+        ? 'Up to date'
+        : sync.fetched > 0
+          ? `${sync.fetched} new message${sync.fetched === 1 ? '' : 's'} cached • ${formatBytes(sync.bytes)}`
+          : 'Already up to date';
       break;
     case 'cancelled':
       title = 'Sync cancelled';
@@ -77,7 +88,7 @@ export function OfflineCacheBanner(): React.ReactElement | null {
       return null;
   }
 
-  const showCancel = sync.phase === 'scanning' || sync.phase === 'fetching';
+  const showCancel = sync.canCancel;
   const showDismiss = sync.phase === 'done' || sync.phase === 'cancelled' || sync.phase === 'error';
   const isError = sync.phase === 'error';
 
@@ -89,6 +100,8 @@ export function OfflineCacheBanner(): React.ReactElement | null {
         {!!subtitle && <Text style={styles.subtitle}>{subtitle}</Text>}
         {(sync.phase === 'fetching' || sync.phase === 'scanning') && (
           <View style={styles.progressTrack}>
+            {/* v2 is cursor-driven, so there is no honest denominator — a full-width
+                track reads as "working" without inventing a percentage. */}
             <View style={[styles.progressFill, { width: `${pct}%` }]} />
           </View>
         )}

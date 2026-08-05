@@ -48,6 +48,12 @@ import { OfflineCacheBanner } from './src/components/OfflineCacheBanner';
 import { useOfflineCacheStore } from './src/stores/offline-cache-store';
 import { useOutboxStore } from './src/stores/outbox-store';
 import { runOfflineSync } from './src/lib/offline-sync';
+import {
+  currentSyncWiring,
+  prepareSyncStores,
+  startSyncEngine,
+  stopSyncEngine,
+} from './src/sync/app-wiring';
 import { spacing, typography, type ThemePalette } from './src/theme/tokens';
 import { useColors } from './src/theme/colors';
 
@@ -274,14 +280,40 @@ export default function App() {
   React.useEffect(() => {
     void useOfflineCacheStore.getState().hydrate();
   }, []);
+  // §14.2's flag gates TRIGGER REGISTRATION, not just the engine body, so the v1 bulk
+  // download and the v2 delta engine can never run concurrently — both would otherwise be
+  // writing an offline copy of the same mail from different cursors.
+  const offlineSyncEngineV2 = useSettingsStore((s) => s.offlineSyncEngineV2);
+
   React.useEffect(() => {
+    if (offlineSyncEngineV2) return;
     if (!offlineCacheEnabled || !haveLiveSession) return;
     // Slight delay so cold start doesn't compete with the inbox load.
     const t = setTimeout(() => {
       void runOfflineSync({ days: offlineCacheDays, maxMB: offlineCacheMaxMB });
     }, 2000);
     return () => clearTimeout(t);
-  }, [offlineCacheEnabled, offlineCacheDays, offlineCacheMaxMB, haveLiveSession]);
+  }, [offlineSyncEngineV2, offlineCacheEnabled, offlineCacheDays, offlineCacheMaxMB, haveLiveSession]);
+
+  // The v2 delta-sync engine (§10 triggers). Registration is what the flag gates; the
+  // engine's own §7.3 checks still decline to start a cycle while offline or
+  // session-less, and §9.5 keeps a disabled account's store unmaterialised.
+  React.useEffect(() => {
+    if (!offlineSyncEngineV2 || !offlineCacheEnabled || !haveLiveSession) return;
+    let cancelled = false;
+    void (async () => {
+      // §8.4/§8.4.1: finish any interrupted purge and honour the store-format marker
+      // BEFORE any cycle can run. A store missing arbitrary records while holding a live
+      // cursor is the worst possible state.
+      await prepareSyncStores();
+      if (cancelled) return;
+      startSyncEngine();
+    })();
+    return () => {
+      cancelled = true;
+      stopSyncEngine();
+    };
+  }, [offlineSyncEngineV2, offlineCacheEnabled, haveLiveSession]);
 
   // Drain the offline action queue (outbox) as soon as we have a live session,
   // and again whenever the network comes back. The flush itself no-ops when
@@ -389,6 +421,10 @@ export default function App() {
       try {
         const stopPushUpdates = await startPushUpdates(client, {
           onStateChange: async (change) => {
+            // T5. A no-op unless the v2 engine is wired. The pushed `newState` is NEVER
+            // written as a cursor (§10.4) — the coordinator's only output is a reason
+            // string, so it is structurally incapable of doing that.
+            currentSyncWiring()?.onStateChange(change);
             await Promise.all([
               useEmailStore.getState().handleStateChange(change),
               useContactsStore.getState().handleStateChange(change),

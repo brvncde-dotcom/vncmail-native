@@ -26,7 +26,6 @@ import {
   REPLY_QUICK_ACTIONS,
   type QuickAction,
 } from '../stores/settings-store';
-import { setEmailKeywords } from '../api/email';
 import { shareEmailEml, shareAttachment, downloadAttachment } from '../lib/email-export';
 import { useKeywordsStore, keywordToken, type KeywordDef } from '../stores/keywords-store';
 import { useSheetDrag } from '../lib/use-sheet-drag';
@@ -78,6 +77,12 @@ export default function EmailThreadScreen({ route, navigation }: Props) {
   const { width: windowWidth } = useWindowDimensions();
   const getEmailDetail = useEmailStore((s) => s.getEmailDetail);
   const markRead = useEmailStore((s) => s.markRead);
+  // Routed through the store (and therefore the outbox) rather than calling
+  // `setEmailKeywords` directly. §5.6 makes the outbox the SOLE durable record of local
+  // intent — the read-time overlay replaced the optimistic write-through — so a keyword
+  // change that skipped it had no durable record at all and was lost on next launch,
+  // with the overlay unable to show it in the meantime either.
+  const setKeywordsFor = useEmailStore((s) => s.setKeywordsFor);
   const deleteEmail = useEmailStore((s) => s.deleteEmail);
   const moveToMailbox = useEmailStore((s) => s.moveToMailbox);
   const archiveEmailAction = useEmailStore((s) => s.archiveEmail);
@@ -292,7 +297,7 @@ export default function EmailThreadScreen({ route, navigation }: Props) {
     if (next[token]) delete next[token];
     else next[token] = true;
     updateLocalKeywords(email.id, next);
-    void setEmailKeywords(email.id, next, ownerAccountId);
+    void setKeywordsFor(email.id, next, ownerAccountId);
   };
 
   // Toggle the star on a specific message — used both by the toolbar (current
@@ -303,8 +308,8 @@ export default function EmailThreadScreen({ route, navigation }: Props) {
     else next.$flagged = true;
     const prev = detailCache.get(target.id);
     if (prev) { detailCache.set(target.id, { ...prev, keywords: next }); bumpCache(); }
-    void setEmailKeywords(target.id, next, ownerAccountId);
-  }, [detailCache, bumpCache, ownerAccountId]);
+    void setKeywordsFor(target.id, next, ownerAccountId);
+  }, [detailCache, bumpCache, ownerAccountId, setKeywordsFor]);
 
   const onToggleStar = () => { if (email) toggleStarFor(email); };
 
@@ -317,7 +322,7 @@ export default function EmailThreadScreen({ route, navigation }: Props) {
       const next = { ...email.keywords };
       delete next.$seen;
       updateLocalKeywords(email.id, next);
-      void setEmailKeywords(email.id, next, ownerAccountId);
+      void setKeywordsFor(email.id, next, ownerAccountId);
     }
   };
 

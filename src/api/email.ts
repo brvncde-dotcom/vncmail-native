@@ -3,10 +3,31 @@ import { uploadBytes } from './blob';
 import { CAPABILITIES } from './types';
 import type { Email, EmailAddress, JMAPMethodCall, Mailbox, Thread } from './types';
 import { toWildcardQuery } from '../lib/search-utils';
+import {
+  asChangesState,
+  asSnapshotState,
+  type ChangesState,
+  type SnapshotState,
+} from '../sync/states';
 
-const EMAIL_LIST_PROPERTIES = [
+// The envelope tier of the sync engine's two-tier record model (design §2.1):
+// ~1 KB per message, and what the offline list, the FTS index and the retention
+// decision need. Exported so `src/sync` names the same set rather than drifting
+// its own copy.
+export const EMAIL_LIST_PROPERTIES = [
   'id', 'threadId', 'mailboxIds', 'keywords', 'size',
   'receivedAt', 'from', 'to', 'cc', 'subject', 'preview', 'hasAttachment',
+];
+
+// RFC 8621 §4.1: `keywords` and `mailboxIds` are the ONLY mutable Email
+// properties, so an `updated` Email costs a 3-property fetch and never a body.
+// This is the largest efficiency difference from the old offline sync, and it is
+// what closes defect D1 (cached envelopes going permanently stale).
+export const EMAIL_MUTABLE_PROPERTIES = ['id', 'keywords', 'mailboxIds'];
+
+/** The four Mailbox properties RFC 8621 §2.2 allows `updatedProperties` to narrow to. */
+export const MAILBOX_COUNT_PROPERTIES = [
+  'totalEmails', 'unreadEmails', 'totalThreads', 'unreadThreads',
 ];
 
 const EMAIL_FULL_PROPERTIES = [
@@ -124,12 +145,24 @@ export async function getMailboxesByIds(
 }
 
 export interface MailboxChangesResult {
-  oldState: string;
-  newState: string;
+  // Branded per design §3.2/§12.1 so `advanceCursor` accepts these and nothing
+  // else. `ChangesState` is a `string & brand`, so existing callers that store
+  // it in a plain `string` are unaffected.
+  oldState: ChangesState;
+  newState: ChangesState;
   hasMoreChanges: boolean;
   created: string[];
   updated: string[];
   destroyed: string[];
+  /**
+   * RFC 8621 §2.2: when only `totalEmails`/`unreadEmails`/`totalThreads`/
+   * `unreadThreads` changed, the server MAY report exactly those; when it cannot
+   * tell, it MUST send null. Counts change on every delivery and every read, so
+   * on a busy account this is the difference between patching four integers and
+   * re-fetching every folder object (§5.2). "May have changed" makes the list an
+   * upper bound, so patching precisely those columns is correct.
+   */
+  updatedProperties: string[] | null;
 }
 
 // Returns null only for `cannotCalculateChanges` — the one error type callers
@@ -153,12 +186,48 @@ export async function getMailboxChanges(
     );
   }
   return {
-    oldState: body.oldState as string,
-    newState: body.newState as string,
+    oldState: asChangesState(body.oldState as string),
+    newState: asChangesState(body.newState as string),
     hasMoreChanges: Boolean(body.hasMoreChanges),
     created: (body.created as string[]) ?? [],
     updated: (body.updated as string[]) ?? [],
     destroyed: (body.destroyed as string[]) ?? [],
+    updatedProperties: (body.updatedProperties as string[] | null) ?? null,
+  };
+}
+
+/**
+ * `Mailbox/get` restricted to a property set — the `updatedProperties` patch path
+ * of §5.2. Returns raw JMAP ids (no `tagMailbox` prefixing): the sync store keys
+ * every row by `(jmapAccountId, id)` itself (S3), so the display-layer prefix
+ * would corrupt the key.
+ */
+export async function getMailboxProperties(
+  ids: string[],
+  properties: string[] | undefined,
+  accountIdOverride?: string,
+): Promise<Mailbox[]> {
+  if (ids.length === 0) return [];
+  const accountId = accountIdOverride ?? jmapClient.accountId;
+  const args: Record<string, unknown> = { accountId, ids };
+  // Omitting `properties` means "all properties" (RFC 8620 §5.1). Passing an
+  // empty array would mean "none", which is not what a caller wanting the full
+  // object intends.
+  if (properties !== undefined) args.properties = properties;
+  const res = await jmapClient.request([['Mailbox/get', args, '0']]);
+  return ((res.methodResponses[0][1].list as Mailbox[]) ?? []);
+}
+
+/** Full `Mailbox/get`, raw ids, for the `created` path and reconcile step 2. */
+export async function getMailboxesRaw(
+  accountIdOverride?: string,
+): Promise<{ list: Mailbox[]; state: SnapshotState }> {
+  const accountId = accountIdOverride ?? jmapClient.accountId;
+  const res = await jmapClient.request([['Mailbox/get', { accountId, ids: null }, '0']]);
+  const body = res.methodResponses[0][1];
+  return {
+    list: (body.list as Mailbox[]) ?? [],
+    state: asSnapshotState(body.state as string),
   };
 }
 
@@ -353,8 +422,9 @@ export async function getEmailsWithState(
 }
 
 export interface EmailChangesResult {
-  oldState: string;
-  newState: string;
+  /** Branded per §3.2/§12.1 — see MailboxChangesResult. */
+  oldState: ChangesState;
+  newState: ChangesState;
   hasMoreChanges: boolean;
   created: string[];
   updated: string[];
@@ -383,13 +453,117 @@ export async function getEmailChanges(
     );
   }
   return {
-    oldState: body.oldState as string,
-    newState: body.newState as string,
+    oldState: asChangesState(body.oldState as string),
+    newState: asChangesState(body.newState as string),
     hasMoreChanges: Boolean(body.hasMoreChanges),
     created: (body.created as string[]) ?? [],
     updated: (body.updated as string[]) ?? [],
     destroyed: (body.destroyed as string[]) ?? [],
   };
+}
+
+/**
+ * Generic `Email/get` over an explicit property set — the envelope tier and the
+ * 3-property `updated` path of §5.3.
+ *
+ * The `state` comes back as a **SnapshotState**, not a ChangesState, so it cannot
+ * be handed to `advanceCursor`. That is D4 becoming a compile error: the shipped
+ * bug adopted an `Email/get` `state` as the next `Email/changes` cursor, skipping
+ * every change in between, permanently and silently.
+ */
+export async function getEmailProperties(
+  ids: string[],
+  properties: string[],
+  accountIdOverride?: string,
+): Promise<{ list: Email[]; notFound: string[]; state: SnapshotState }> {
+  const accountId = accountIdOverride ?? jmapClient.accountId;
+  const res = await jmapClient.request([
+    ['Email/get', { accountId, ids, properties }, '0'],
+  ]);
+  const body = res.methodResponses[0][1];
+  return {
+    list: (body.list as Email[]) ?? [],
+    notFound: (body.notFound as string[]) ?? [],
+    state: asSnapshotState(body.state as string),
+  };
+}
+
+/**
+ * §4.1 step 1 / §7.6 step 1: capture both cursor positions in ONE request, before
+ * touching any data. The order matters — the cursor must be OLDER than the
+ * enumeration, so the first delta cycle re-delivers a handful of changes we
+ * already have (harmless, per I5) instead of leaving a permanent gap. The
+ * opposite order is cheaper and silently loses mail.
+ */
+export async function captureStates(
+  accountIdOverride?: string,
+): Promise<{ mailbox: SnapshotState; email: SnapshotState }> {
+  const accountId = accountIdOverride ?? jmapClient.accountId;
+  const res = await jmapClient.request([
+    ['Mailbox/get', { accountId, ids: [] }, '0'],
+    ['Email/get', { accountId, ids: [] }, '1'],
+  ]);
+  return {
+    mailbox: asSnapshotState(res.methodResponses[0][1].state as string),
+    email: asSnapshotState(res.methodResponses[1][1].state as string),
+  };
+}
+
+/** Thrown when `Email/query` rejects an `anchor` we supplied (§6.1's guard rung 1). */
+export class AnchorNotFoundError extends Error {
+  constructor() {
+    super('Email/query: anchorNotFound');
+    this.name = 'AnchorNotFoundError';
+  }
+}
+
+/**
+ * The ascending keyset window of §6.1 — the coverage scan's page.
+ *
+ * Keyset, not `position`: over a mailbox receiving mail, `position` shifts every
+ * later page by the number of insertions ahead of it, pushing a message out of the
+ * scan's reach entirely. That message is pre-existing relative to our cursor, so
+ * `Email/changes` will never report it — a permanent hole with no signal that it
+ * exists (D8, §6.2). Ascending keyset is immune by construction: new mail arrives
+ * at the tail, so insertions never shift rows the scan has passed.
+ *
+ * `calculateTotal: false` because the total is unstable and unused.
+ */
+export async function queryEmailWindow(options: {
+  after?: string;
+  before?: string;
+  limit: number;
+  isAscending?: boolean;
+  anchor?: string;
+  anchorOffset?: number;
+  accountId?: string;
+}): Promise<{ ids: string[] }> {
+  const accountId = options.accountId ?? jmapClient.accountId;
+  const filter: Record<string, unknown> = {};
+  if (options.after !== undefined) filter.after = options.after;
+  if (options.before !== undefined) filter.before = options.before;
+
+  const args: Record<string, unknown> = {
+    accountId,
+    filter,
+    sort: [{ property: 'receivedAt', isAscending: options.isAscending ?? true }],
+    limit: options.limit,
+    calculateTotal: false,
+  };
+  if (options.anchor !== undefined) {
+    args.anchor = options.anchor;
+    args.anchorOffset = options.anchorOffset ?? 1;
+  }
+
+  const res = await jmapClient.request([['Email/query', args, '0']]);
+  const [name, body] = res.methodResponses[0];
+  if (name === 'error') {
+    if (body.type === 'anchorNotFound') throw new AnchorNotFoundError();
+    throw new Error(
+      `Email/query failed: ${(body.type as string) ?? 'unknown'}${body.description ? ` - ${body.description}` : ''}`,
+    );
+  }
+  return { ids: (body.ids as string[]) ?? [] };
 }
 
 export async function getFullEmail(id: string, accountIdOverride?: string): Promise<Email> {

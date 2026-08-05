@@ -59,6 +59,22 @@ vi.mock('react-native', () => {
   };
 });
 
+// 3. NetInfo: the package ships Flow-typed source, which the transform cannot parse —
+//    it fails with a misleading `SyntaxError: Unexpected token 'typeof'` pointing at
+//    whatever TS syntax the importing file happens to contain first. Any test that
+//    transitively imports `network-store` (outbox, email-store, auth-store, the sync
+//    wiring) hits it, and the whole suite FAILS TO LOAD rather than failing a test.
+//    Several test files already mock this locally for the same reason; hoisting it here
+//    means a new test does not have to rediscover it. A local `vi.mock` still wins.
+vi.mock('@react-native-community/netinfo', () => ({
+  default: {
+    addEventListener: () => () => undefined,
+    fetch: async () => ({ isConnected: true, isInternetReachable: true }),
+    configure: () => undefined,
+  },
+  useNetInfo: () => ({ isConnected: true, isInternetReachable: true }),
+}));
+
 vi.mock('expo-secure-store', () => ({
   setItemAsync: vi.fn(async () => undefined),
   getItemAsync: vi.fn(async () => null),
