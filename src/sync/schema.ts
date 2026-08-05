@@ -19,8 +19,12 @@
  * Bumped for any breaking change to the statements below. A mismatch against the
  * registry's mirrored value purges and re-bootstraps (§8.4.1) — §14.1 already
  * specifies discard-and-rebuild, so there is no migration path to maintain.
+ *
+ * v3 adds the `fts` virtual table (§9.4 step-9 hook) — no migration needed, the
+ * bump alone purges and re-bootstraps every account, which repopulates it via the
+ * normal C1/C2 body-fetch jobs.
  */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /** Plain expo-sqlite. `sqlite-cipher` is the later, human-gated flip (§14.3 step 3.7). */
 export const STORE_FORMAT = 'sqlite-plain' as const;
@@ -81,15 +85,40 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
   // Cursors, coverage, flags. Row-per-field so §9.1's patches are genuinely
   // field-level (I12) rather than a read-modify-write of one big blob.
   `CREATE TABLE IF NOT EXISTS sync_state (k TEXT PRIMARY KEY, v TEXT NOT NULL)`,
+
+  // §9.4 step-9 hook. `jmap_account_id`/`email_id` are UNINDEXED — plain columns
+  // carried alongside the indexed text, not part of the compound PK every other
+  // table uses (FTS5 has no notion of a composite key; external-content/rowid
+  // mode wants a single integer rowid, which nothing here has). Filtering is
+  // `WHERE jmap_account_id = ?`; `bm25()` scores only the indexed columns, so
+  // these two never affect ranking. Populated by `upsertFtsRow`/`deleteFtsRows`
+  // in fts.ts, called from `upsertEnvelopes`, `putBodyIfEnvelopeExists`,
+  // `deleteEmails`, `deleteBodies` — the only write paths for indexable content.
+  `CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
+     jmap_account_id UNINDEXED,
+     email_id UNINDEXED,
+     subject,
+     preview,
+     body
+   )`,
 ];
 
-/** The tables `clearRecords()` wipes: records + the body queue (S12), NOT sync_state. */
+/**
+ * The tables `clearRecords()` wipes: records + the body queue (S12), NOT sync_state.
+ *
+ * `fts` belongs here too, not just on `purgeAccount`'s file delete: `clearRecords()`
+ * runs `DELETE FROM` per table against the *same open database file* (a forced
+ * resync, not a purge), so a stale `fts` row would otherwise survive it and could
+ * outlive the message it indexed if that message was deleted upstream during the
+ * resync gap — `DELETE FROM fts` is valid on a virtual table, same as any other.
+ */
 export const RECORD_TABLES: readonly string[] = [
   'envelope',
   'email_mailbox',
   'body',
   'body_queue',
   'mailbox',
+  'fts',
 ];
 
 // ── sync_state key layout ──

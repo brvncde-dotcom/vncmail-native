@@ -8,6 +8,7 @@
 // every cached body.
 
 import type { MailboxRights } from '../api/types';
+import { deleteFtsRows, type FtsHit, type FtsSearchOpts, ftsSearchRows, upsertFtsRow } from './fts';
 import { Mutex } from './mutex';
 import type { SyncRegistry } from './registry';
 import { syncRegistry } from './registry';
@@ -299,6 +300,7 @@ class SqliteTxn implements SyncTxn {
         ],
       );
       await this.replaceMembership(r.jmapAccountId, r.id, r.mailboxIds);
+      await upsertFtsRow(this.db, r.jmapAccountId, r.id);
     }
   }
 
@@ -372,6 +374,7 @@ class SqliteTxn implements SyncTxn {
       [body.bytes, key.jmapAccountId, key.id],
     );
     await this.dequeueBodies([key]);
+    await upsertFtsRow(this.db, key.jmapAccountId, key.id);
     return true;
   }
 
@@ -388,6 +391,7 @@ class SqliteTxn implements SyncTxn {
         'DELETE FROM body_queue WHERE jmap_account_id = ? AND email_id = ?',
         params,
       );
+      await deleteFtsRows(this.db, k.jmapAccountId, [k.id]);
     }
   }
 
@@ -401,6 +405,7 @@ class SqliteTxn implements SyncTxn {
         'UPDATE envelope SET has_body = 0, body_bytes = 0 WHERE jmap_account_id = ? AND id = ?',
         [k.jmapAccountId, k.id],
       );
+      await upsertFtsRow(this.db, k.jmapAccountId, k.id);
     }
   }
 
@@ -894,6 +899,17 @@ class SqliteStore implements SyncStore {
     return rows.map((r) => toEnvelopeRow(r, membership.get(r.id) ?? {}));
   }
 
+  /** Local BM25 recall (fts.ts) — not part of `SyncStore`, see that file's header. */
+  async ftsSearch(
+    jmapAccountId: JmapAccountId,
+    query: string,
+    opts?: FtsSearchOpts,
+  ): Promise<FtsHit[]> {
+    const db = await this.dbForRead();
+    if (!db) return [];
+    return ftsSearchRows(db, jmapAccountId, query, opts);
+  }
+
   async countEnvelopes(q?: { jmapAccountId?: JmapAccountId; mailboxId?: string }): Promise<number> {
     const db = await this.dbForRead();
     if (!db) return 0;
@@ -1068,6 +1084,23 @@ export class SqliteStoreFactory implements SyncStoreFactory {
     );
     this.open_.set(accountId, store);
     return store;
+  }
+
+  /**
+   * Passthrough to the SQLite-only local search leg (fts.ts). Not part of
+   * `SyncStoreFactory` — same reasoning as `SqliteStore.ftsSearch`'s own
+   * comment: FTS5 has no `MemoryStore` equivalent, so it isn't in the shared
+   * contract. `open()` always constructs a `SqliteStore` in this factory; the
+   * cast is local to this file, not a leak of the concrete type.
+   */
+  async ftsSearch(
+    accountId: LocalAccountId,
+    jmapAccountId: JmapAccountId,
+    query: string,
+    opts?: FtsSearchOpts,
+  ): Promise<FtsHit[]> {
+    const store = (await this.open(accountId)) as SqliteStore;
+    return store.ftsSearch(jmapAccountId, query, opts);
   }
 
   /** So Settings can show accurate storage stats without creating anything (§9.5). */
